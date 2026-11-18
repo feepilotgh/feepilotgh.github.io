@@ -144,6 +144,13 @@
           return { data: { user: r.j.user || r.j, session: null }, error: null };
         } catch (e) { return { data: { user: null, session: null }, error: NET(e) }; }
       },
+      signInAnonymously: async function () {
+        try {
+          var r = await authReq('signup', { data: {} });
+          if (!r.ok) return { data: { user: null, session: null }, error: r.e };
+          var s = norm(r.j); save(s); emit('SIGNED_IN', pub(s)); return { data: { user: s.user, session: pub(s) }, error: null };
+        } catch (e) { return { data: { user: null, session: null }, error: NET(e) }; }
+      },
       signOut: async function () {
         var s = load(); save(null);
         try { if (s) await authReq('logout', null, 'POST', s.access_token); } catch (e) { }
