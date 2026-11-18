@@ -969,7 +969,7 @@ function showCode(c, n) {
   window.__cc = f;
   sheet('<h2>Code for ' + E(who) + '</h2><div style="font-size:34px;font-weight:800;letter-spacing:6px;text-align:center;margin:14px 0">' + E(f) + '</div><div class="m c">Works once. Expires in 7 days.</div><div class="btns"><a class="btn" style="text-align:center;text-decoration:none" target="_blank" rel="noopener" href="https://wa.me/?text=' + encodeURIComponent(msg) + '">Send on WhatsApp</a><button class="btn sec" onclick="navigator.clipboard&amp;&amp;navigator.clipboard.writeText(window.__cc).then(()=>toast(\'Copied\',\'ok\'))">Copy code</button></div>');
 }
-async function cancelCode(c) { if (!await askYes('Cancel this code?', 'It will stop working.', 'Cancel code')) return; const r = await sb.rpc('cancel_join_code', { p_school: sid(), p_code: c }); if (r.error) return toast(friendly(r.error), 'bad'); await pull(); draw(true); }
+async function cancelCode(c) { if (!await askYes('Cancel this code?', 'It will stop working.', 'Cancel code')) return; const r = await sb.rpc('cancel_join_code', { p_school: sid(), p_code: c }); if (r.error) return toast(friendly(r.error) + ' [' + String(r.error.message || '').slice(0, 90) + ']', 'bad'); await pull(); draw(true); }
 async function setStaff(u, role0, a) { if (!need()) return; if (!a && !await askYes('Deactivate this person?', 'They will no longer be able to open ' + D.school.name + '.', 'Deactivate')) { draw(true); return; } const r = await sb.rpc('set_staff', { p_school: sid(), p_user: u, p_role: role0, p_active: a }); if (r.error) return toast(friendly(r.error), 'bad'); toast('Staff updated.', 'ok'); await pull(); draw(true); }
 
 /* ---------- settings ---------- */
