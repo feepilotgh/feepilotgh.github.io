@@ -1103,5 +1103,20 @@ PAGES.platform = function () {
   return h;
 };
 
+/* Show/hide password eye on every password box */
+(function () {
+  function eyes() {
+    document.querySelectorAll('input[type=password]:not([data-eye])').forEach(i => {
+      i.setAttribute('data-eye', '1');
+      const w = document.createElement('span'); w.className = 'pw';
+      i.parentNode.insertBefore(w, i); w.appendChild(i);
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'eye'; b.setAttribute('aria-label', 'Show password'); b.textContent = '👁';
+      b.onclick = () => { const s = i.type === 'password'; i.type = s ? 'text' : 'password'; b.textContent = s ? '🙈' : '👁'; b.setAttribute('aria-label', s ? 'Hide password' : 'Show password'); };
+      w.appendChild(b);
+    });
+  }
+  try { new MutationObserver(eyes).observe(document.body, { childList: true, subtree: true }); eyes(); } catch (e) { }
+})();
+
 boot();
 if('serviceWorker' in navigator&&location.protocol.startsWith('http')){addEventListener('load',function(){navigator.serviceWorker.register('sw.js',{scope:'./'}).catch(function(){})})}
