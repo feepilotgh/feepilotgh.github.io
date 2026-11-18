@@ -1,0 +1,24 @@
+name: unpack
+on:
+  push:
+    paths:
+      - 'feepilot_site.zip'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack site
+        run: |
+          test -f feepilot_site.zip
+          unzip -o feepilot_site.zip -x _headers
+          rm feepilot_site.zip
+          touch .nojekyll
+          git config user.name "FeePilot"
+          git config user.email "feepilot@users.noreply.github.com"
+          git add -A
+          git commit -m "Unpack FeePilot site"
+          git push
