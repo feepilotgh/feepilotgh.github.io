@@ -190,7 +190,7 @@ async function signOut() {
 async function makeSchool() {
   const n = $('sc_n').value.trim(); if (n.length < 2) { toast('Enter the school name.', 'bad'); return; }
   const r = await sb.rpc('create_school', { p_name: n }); if (r.error) return toast(friendly(r.error), 'bad');
-  await pull(); location.hash = '#/home'; draw();
+  await pull(); location.hash = '#/home'; draw(); toast('School created. It will be switched on once FeePilot approves it.', 'ok');
 }
 
 /* ---------- router ---------- */
@@ -392,7 +392,8 @@ function isTyping() { const a = document.activeElement; return a && /^(INPUT|TEX
 function subBanner() {
   const s = D.sub; if (!s) return ''; const p = s.plans || {}; let m = '', k = 'warn';
   const gone = s.status === 'trial' ? (s.trial_ends_at && new Date(s.trial_ends_at) < new Date()) : s.status === 'active' ? (s.renews_on && new Date(s.renews_on).getTime() + 5 * 864e5 < Date.now()) : false;
-  if (gone) { m = 'Subscription ended. The school is read-only. Call FeePilot support to renew.'; }
+  if (s.status === 'pending') { m = 'Waiting for approval. You can look around, but recording is switched on once FeePilot activates your school.'; k = 'gold'; }
+  else if (gone) { m = 'Subscription ended. The school is read-only. Call FeePilot support to renew.'; }
   else if (s.status === 'active' && s.renews_on && (new Date(s.renews_on) - Date.now()) < 7 * 864e5) { m = 'Subscription renews ' + fd(s.renews_on) + '. Please pay before then to stay active.'; k = 'gold'; }
   else if (s.status === 'trial') { m = 'Free trial' + (s.trial_ends_at ? ' ends ' + fd(s.trial_ends_at) : ''); k = 'gold'; }
   else if (s.status === 'past_due') m = 'Subscription overdue. Contact FeePilot support to avoid suspension.';
@@ -1087,7 +1088,7 @@ function paQuick(id, k) {
   const x = PA.S.find(z => z.id === id); if (!x) return;
   const lbl = { t: 'start a 14-day free trial', m: 'record 1 month (GH₵ 250)', q: 'record 1 term (GH₵ 700)' }[k];
   if (!confirm(x.name + ': ' + lbl + '?')) return;
-  if (k === 't') { const d = new Date(Date.now() + 14 * 864e5).toISOString(); return sb.rpc('platform_set_subscription', { p_school: id, p_plan: null, p_status: 'trial', p_trial_ends: d, p_renews: null }).then(r => paRun(r, 'Trial started: 14 days.')); }
+  if (k === 't') { const d = new Date(Date.now() + 14 * 864e5).toISOString(); return sb.rpc('platform_set_subscription', { p_school: id, p_plan: ((PA.PL.find(z => z.is_default) || {}).id) || null, p_status: 'trial', p_trial_ends: d, p_renews: null }).then(r => paRun(r, 'Trial started: 14 days.')); }
   const iso = d => d.toISOString().slice(0, 10), today = new Date(iso(new Date()));
   const cur = x.renews_on ? new Date(x.renews_on) : today, from = cur > today ? cur : today, to = new Date(from);
   to.setUTCMonth(to.getUTCMonth() + (k === 'q' ? 4 : 1));
@@ -1109,9 +1110,10 @@ PAGES.platform = function () {
   if (PA.note) h += '<div class="card" style="' + (PA.note.startsWith('Failed') ? 'border-color:#f3b4b4;color:#b42318' : 'border-color:#b7e4c7;color:#15803d') + '">' + E(PA.note) + '</div>';
   if (!PA.loaded) return h + '<div class="card"><div class="m">' + (online() ? 'Loading…' : 'Connect to the internet to use the platform admin.') + '</div></div>';
   if (PA.tab === 's') {
-    h += '<div class="card"><h3>Schools (' + PA.S.length + ')</h3>' + (PA.S.map(x => {
+    const pend = PA.S.filter(x => x.sub_status === 'pending').length; PA.S.sort((a, b) => (b.sub_status === 'pending') - (a.sub_status === 'pending'));
+    h += '<div class="card"><h3>Schools (' + PA.S.length + ')' + (pend ? ' · <span style="color:#b45309">' + pend + ' waiting for approval</span>' : '') + '</h3>' + (PA.S.map(x => {
       const ends = x.sub_status === 'trial' ? x.trial_ends_at : x.renews_on, dl = days(ends);
-      const warn = x.sub_status !== 'suspended' && x.status !== 'suspended' && dl !== null && dl < 0 ? ' <span class="badge" style="background:#fde8e8;color:#b42318;margin:0 6px">read-only</span>' : (dl !== null && dl <= 7 ? ' <span class="badge" style="background:#fff3cd;color:#8a6d00;margin:0 6px">' + dl + ' days left</span>' : '');
+      const wait = x.sub_status === 'pending' ? ' <span class="badge" style="background:#fff3cd;color:#8a6d00;margin:0 6px">waiting for approval</span>' : ''; const warn = x.sub_status === 'pending' ? wait : x.sub_status !== 'suspended' && x.status !== 'suspended' && dl !== null && dl < 0 ? ' <span class="badge" style="background:#fde8e8;color:#b42318;margin:0 6px">read-only</span>' : (dl !== null && dl <= 7 ? ' <span class="badge" style="background:#fff3cd;color:#8a6d00;margin:0 6px">' + dl + ' days left</span>' : '');
       return '<div class="row" style="flex-wrap:wrap"><div class="t"><b>' + E(x.name) + '</b> <span class="m">' + E(x.code || '') + '</span>' + warn + '<span class="m">' + E(x.plan_name || 'no plan') + ' · ' + E(x.sub_status || '') + (x.trial_ends_at && x.sub_status === 'trial' ? ' · trial ends ' + E(x.trial_ends_at.slice(0, 10)) : '') + (x.renews_on ? ' · renews ' + E(x.renews_on) : '') + ' · ' + x.students + ' students · ' + x.staff + ' staff</span></div>' +
         '<div style="width:100%;display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="chip" onclick="paQuick(\'' + x.id + '\',\'t\')">Free trial 14 days</button><button class="chip" onclick="paQuick(\'' + x.id + '\',\'m\')">Paid: 1 month · 250</button><button class="chip" onclick="paQuick(\'' + x.id + '\',\'q\')">Paid: 1 term · 700</button></div><span class="badge ' + (x.status === 'suspended' ? 'b' : '') + '">' + E(x.status) + '</span><button class="chip" onclick="paStatus(\'' + x.id + '\',\'' + (x.status === 'suspended' ? 'active' : 'suspended') + '\')">' + (x.status === 'suspended' ? 'Reactivate' : 'Suspend') + '</button></div>';
     }).join('') || '<div class="m">No schools yet.</div>') + '</div>';
