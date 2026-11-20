@@ -1022,13 +1022,13 @@ PAGES.settings = function () {
   const sc = D.school, logo = sc.logo && sb ? sb.storage.from('logos').getPublicUrl(sc.logo).data.publicUrl : '';
   return '<h2 class="ph">School settings</h2><div class="sub">These appear on every receipt and statement.</div><div class="card">' +
     (logo ? '<img alt="" src="' + E(logo) + '" style="max-height:64px;margin-bottom:10px">' : '') + field('gs_n', 'School name', '', 'value="' + E(sc.name) + '"') + field('gs_a', 'Address', 'Town, region', 'value="' + E(sc.address || '') + '"') + field('gs_p', 'Phone', '0244 000 000', 'inputmode="tel" value="' + E(sc.phone || '') + '"') +
-    '<label class="l" for="gs_l">Logo (PNG, JPG or WebP, max 1 MB)</label><input class="in" id="gs_l" type="file" accept="image/png,image/jpeg,image/webp"><div class="btns"><button class="btn blk" onclick="saveSettings()">Save settings</button></div></div>' +
+    '<label class="l" for="gs_l">Logo (any picture, it is resized for you)</label><input class="in" id="gs_l" type="file" accept="image/png,image/jpeg,image/webp"><div class="btns"><button class="btn blk" onclick="saveSettings()">Save settings</button></div></div>' +
     (D.sub ? '<div class="card"><h3>Subscription</h3><div class="row"><div class="t"><b>' + E((D.sub.plans || {}).name || 'Plan') + '</b><span class="m">' + (D.sub.status === 'trial' && D.sub.trial_ends_at ? 'Trial ends ' + E(D.sub.trial_ends_at.slice(0, 10)) : '') + '</span></div><div class="v"><span class="badge ' + (D.sub.status === 'active' || D.sub.status === 'trial' ? 'ok' : 'bad') + '">' + E(D.sub.status) + '</span></div></div>' + (window.SUPPORT_WA ? '<div class="btns"><a class="btn sec" target="_blank" rel="noopener" href="https://wa.me/' + E(window.SUPPORT_WA) + '">Talk to FeePilot support</a></div>' : '') + '</div>' : '');
 };
 async function saveSettings() {
   if (!need()) return; const u = { name: val('gs_n'), address: val('gs_a') || null, phone: val('gs_p') || null }, fl = $('gs_l').files[0];
   if (!u.name) return toast('School name is required.', 'bad');
-  if (fl) { if (!/^image\/(png|jpeg|webp)$/.test(fl.type) || fl.size > 1048576) return toast('Logo must be PNG, JPG or WebP under 1 MB.', 'bad'); const p = sid() + '/logo-' + Date.now() + '.' + fl.type.split('/')[1], up = await sb.storage.from('logos').upload(p, fl, { contentType: fl.type }); if (up.error) return toast('Upload failed: ' + up.error.message, 'bad'); u.logo_path = p; }
+  if (fl) { if (!/^image\//.test(fl.type)) return toast('Please choose a picture file (PNG, JPG or WebP).', 'bad'); let bl; try { bl = await resizeImg(fl, 512, 'image/png'); } catch (e) { return toast('Could not read that picture. Try another one.', 'bad'); } const p = sid() + '/logo-' + Date.now() + '.png', up = await sb.storage.from('logos').upload(p, bl, { contentType: 'image/png' }); if (up.error) return toast('Upload failed: ' + up.error.message, 'bad'); u.logo_path = p; }
   const r = await sb.from('schools').update(u).eq('id', sid()); if (r.error) return toast(friendly(r.error), 'bad'); toast('Settings saved.', 'ok'); await pull(); draw(true);
 }
 
