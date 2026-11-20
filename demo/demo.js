@@ -49,6 +49,7 @@
    maybeSingle:function(){q.single=true;return api},single:function(){q.single=true;return api},
    then:function(a,b){return new Promise(function(res){setTimeout(function(){var out;try{out=run()}catch(e){out={data:null,error:{message:e.message}}}res(out)},3)}).then(a,b)}};
   function run(){
+   if(window.__NETFAIL)return {data:null,error:{message:'Network error: Failed to fetch'}};
    if(!session)return {data:[],error:null};
    if(q.op==='select'){var rows=view(name).filter(function(r){return q.f.every(function(f){return f(r)})});
     q.order.slice().reverse().forEach(function(o){rows.sort(function(a,b){var x=a[o[0]],y=b[o[0]];return (x<y?-1:x>y?1:0)*(o[1]?1:-1)})});
@@ -65,7 +66,7 @@
   }
   return api}
  function rpc(n,a){return new Promise(function(res){setTimeout(function(){res(rpc0(n,a||{}))},4)})}
- function rpc0(n,a){LOG.push(['rpc',n]);
+ function rpc0(n,a){if(window.__NETFAIL)return {data:null,error:{message:'Network error: Failed to fetch'}};LOG.push(['rpc',n]);
   if(n==='is_platform_admin')return {data:window.__ADMIN===true,error:null};
   if(n==='accept_invites')return {data:0,error:null};
   if(n==='my_schools')return {data:MEM?[]:[{id:SCH,status:'active'}],error:null};

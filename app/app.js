@@ -85,7 +85,10 @@ const canFee = () => ['proprietor', 'admin', 'accountant'].includes(role());
 const isAd = () => ['proprietor', 'admin'].includes(role());
 const ROLES = { proprietor: 'Proprietor', admin: 'Administrator', accountant: 'Accountant', account_officer: 'Account officer', auditor: 'Auditor', readonly: 'Read-only' };
 const classes = () => [...new Set(D.students.map(s => s.class_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-const online = () => navigator.onLine;
+let NETDOWN = 0;
+const isNetErr = e => /failed to fetch|network|load failed|timeout|fetch/i.test((e && e.message) || String(e || ''));
+const online = () => navigator.onLine && Date.now() - NETDOWN > 15000;
+(function () { const f0 = window.fetch; if (!f0) return; window.fetch = function () { return f0.apply(this, arguments).then(r => { NETDOWN = 0; return r; }, e => { NETDOWN = Date.now(); throw e; }); }; })();
 
 async function all(mk) { // read every row, 1000 at a time (the server returns at most 1000 per request)
   let o = [], f = 0;
@@ -131,28 +134,66 @@ async function pull() {
       all(() => sb.from('students').select('*').order('full_name').order('id')),
       all(() => sb.from('fee_balances').select('*').order('fee_item_id')),
       all(() => sb.from('payments').select('*').gte('created_at', since).order('created_at', { ascending: false }).order('id'))]).catch(e => [null, null, null]);
-    if (s && f && p) { D.students = s; D.fees = f; D.pays = p.slice(0, 4000); D.loaded = Date.now(); reindex(); await saveCache(); }
+    if (s && f && p) { D.students = s; D.fees = f; D.pays = p.slice(0, 4000); D.loaded = Date.now(); }
+    overlay(); reindex(); if (s && f && p) await saveCache();
   } finally { loading = false; }
 }
 const saveCache = () => kv.set('cache', Object.assign({ school: D.school, students: D.students, fees: D.fees, pays: D.pays, staff: D.staff, dash: D.dash, dcl: D.dcl, dme: D.dme, sub: D.sub, smsc: D.smsc, loaded: D.loaded }, Object.fromEntries(LISTS.map(k => [k, D[k]]))));
 
 /* ---------- offline queue + sync ---------- */
+/* local copies of queued table writes, so the app works with no internet */
+const tmatch = (r, m) => Object.keys(m || {}).every(k => r[k] === m[k]);
+function applyLocal(q) {
+  const T = q.table, rows = q.rows || [], nowI = q.at;
+  const lst = { accounts: 'acc', suppliers: 'sup', academic_years: 'yrs', terms: 'trm', method_accounts: 'ma' }[T];
+  if (T === 'students') {
+    if (q.op === 'update') D.students.forEach(s => { if (tmatch(s, q.match)) Object.assign(s, rows[0]); });
+    else rows.forEach(r => { if (D.students.some(s => s.id === r.id || (q.op === 'upsert' && String(s.student_no).toLowerCase() === String(r.student_no).toLowerCase()))) return; D.students.push(Object.assign({ status: 'active', sms_opt_out: false, created_at: nowI }, r)); });
+    D.students.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
+  } else if (T === 'fee_items') {
+    rows.forEach(r => { if (D.fees.some(f => f.fee_item_id === r.id)) return; D.fees.push({ school_id: r.school_id, fee_item_id: r.id, student_id: r.student_id, category: r.category, academic_year: r.academic_year, amount_minor: r.amount_minor, carried_to: null, paid_minor: 0, balance_minor: r.amount_minor }); });
+  } else if (T === 'accounts') {
+    rows.forEach(r => { if (!D.acc.some(a => a.id === r.id)) { D.acc.push(Object.assign({ created_at: nowI }, r)); D.accb.push({ account_id: r.id, school_id: r.school_id, balance_minor: r.opening_minor || 0 }); } });
+  } else if (T === 'suppliers') {
+    rows.forEach(r => { if (!D.sup.some(a => a.id === r.id)) { D.sup.push(Object.assign({ created_at: nowI }, r)); D.sbal.push({ id: r.id, supplier_id: r.id, school_id: r.school_id, name: r.name, balance_minor: 0 }); } });
+  } else if (T === 'method_accounts') {
+    rows.forEach(r => { D.ma = D.ma.filter(x => x.method !== r.method); D.ma.push(r); });
+  } else if (lst) {
+    rows.forEach(r => { if (!D[lst].some(a => a.id === r.id)) D[lst].push(Object.assign({ created_at: nowI }, r)); });
+  }
+}
+function overlay() { D.q.filter(q => q.k === 't' && q.state !== 'done' && q.state !== 'failed').forEach(applyLocal); }
+async function tq(table, op, rows, o) { // save on this device now, send when online
+  o = o || {}; const item = { k: 't', id: crypto.randomUUID(), table, op, rows, match: o.match || null, onConflict: o.onConflict || null, ignoreDuplicates: !!o.ignoreDuplicates, label: o.label || table, at: new Date().toISOString(), state: 'pending' };
+  D.q.push(item); applyLocal(item); reindex(); await kv.set('q', D.q); await saveCache();
+  return item;
+}
+async function sendT(q) {
+  const t = sb.from(q.table);
+  if (q.op === 'update') { let b = t.update(q.rows[0]); Object.keys(q.match || {}).forEach(k => { b = b.eq(k, q.match[k]); }); return await b; }
+  if (q.op === 'insert') return await t.upsert(q.rows, { onConflict: 'id', ignoreDuplicates: true });
+  const o = {}; if (q.onConflict) o.onConflict = q.onConflict; if (q.ignoreDuplicates) o.ignoreDuplicates = true; return await t.upsert(q.rows, o);
+}
 async function sync(quiet) {
-  if (busy || !online() || !U || !sb) return;
+  if (busy || !online() || !U || !sb || U.id === 'offline') return;
   busy = true; draw();
   try {
     for (const q of D.q.filter(x => x.state !== 'done')) {
       let r;
-      if (q.k === 'r') r = await sb.rpc('queue_reminders', { p_school: sid(), p_students: q.ids, p_template: q.tpl, p_when: q.when || null });
-      else if (q.k === 'x') r = await sb.from('expenses').upsert(q.row, { onConflict: 'id', ignoreDuplicates: true });
-      else r = await sb.rpc('record_payment', { p_id: q.id, p_fee_item: q.fee, p_amount: q.amt, p_method: q.method, p_ref: q.ref || null, p_occurred: q.at, p_device: devId });
+      try {
+        if (q.k === 'r') r = await sb.rpc('queue_reminders', { p_school: sid(), p_students: q.ids, p_template: q.tpl, p_when: q.when || null });
+        else if (q.k === 't') r = await sendT(q);
+        else if (q.k === 'x') r = await sb.from('expenses').upsert(q.row, { onConflict: 'id', ignoreDuplicates: true });
+        else r = await sb.rpc('record_payment', { p_id: q.id, p_fee_item: q.fee, p_amount: q.amt, p_method: q.method, p_ref: q.ref || null, p_occurred: q.at, p_device: devId });
+      } catch (e) { r = { error: e }; }
+      if (r.error && isNetErr(r.error)) { NETDOWN = Date.now(); break; } // no internet: stay pending, try again later
       if (r.error) { q.state = 'failed'; q.err = friendly(r.error); } else { q.state = 'done'; q.receipt = r.data && (r.data.receipt_no || (Array.isArray(r.data) && r.data[0] && r.data[0].receipt_no)); }
     }
     await kv.set('q', D.q);
-    await pull();
+    if (online()) await pull();
     D.q = D.q.filter(x => x.state !== 'done' || (Date.now() - new Date(x.at)) < 86400000);
     await kv.set('q', D.q);
-  } catch (e) { if (!quiet) toast(friendly(e), 'bad'); }
+  } catch (e) { if (!quiet && !isNetErr(e)) toast(friendly(e), 'bad'); }
   busy = false; draw(); if (window.afterSync) window.afterSync();
 }
 async function enqueue(item) { D.q.push(item); await kv.set('q', D.q); draw(); if (online()) await sync(true); }
@@ -169,7 +210,7 @@ async function boot() {
     if (!U && c && c.school && !online()) U = { id: 'offline' };
     sb.auth.onAuthStateChange((ev, se) => { if (ev === 'PASSWORD_RECOVERY') { RECOVERY = true; draw(); } const nu = se ? se.user : null; if ((nu && (!U || U.id !== nu.id)) || (!nu && U && U.id !== 'offline')) { U = nu; if (U) pull().then(draw); else draw(); } });
     draw();
-    if (U && U.id !== 'offline') { await pull(); draw(); sync(true); }
+    if (U && U.id !== 'offline') { await pull(); draw(); sync(true); setTimeout(() => { if (online() && typeof lj === 'function' && typeof XLSX_URLS !== 'undefined') lj(XLSX_URLS).catch(() => { }); }, 4000); }
   } catch (e) { draw(); }
 }
 async function doAuth(up) {
@@ -197,7 +238,8 @@ async function makeSchool() {
 function parseRoute() { const h = (location.hash || '#/home').replace(/^#\/?/, ''); const [name, id] = h.split('/'); return { name: name || 'home', id: id ? decodeURIComponent(id) : null }; }
 function go(path) { if (location.hash === '#/' + path) draw(); else location.hash = '#/' + path; }
 addEventListener('hashchange', () => { closeSheet(); draw(); window.scrollTo(0, 0); });
-addEventListener('online', () => { sync(true); });
+addEventListener('online', () => { NETDOWN = 0; sync(true); });
+setInterval(() => { if (D.q.some(x => x.state === 'pending' || (!x.state))) sync(true); }, 20000);
 addEventListener('offline', () => draw());
 
 async function joinCode() {
@@ -705,8 +747,9 @@ async function rcPDF(id) {
 
 /* ===== FeePilot pages 2: students & fees management, expenses, accounts, budgets, suppliers, years ===== */
 const need = () => { if (online()) return true; toast('This needs an internet connection.', 'bad'); return false; };
+async function qdone(ok) { toast(online() ? ok : ok + ' Saved on this device, it will sync when you are online.', 'ok'); closeSheet(true); draw(true); sync(true); return true; }
 async function saved(r, ok, keepOpen) { if (r.error) { toast(friendly(r.error), 'bad'); return false; } toast(ok, 'ok'); if (!keepOpen) closeSheet(true); await pull(); draw(true); return true; }
-const lj = urls => new Promise((res, rej) => { urls = [].concat(urls); const t = i => { if (i >= urls.length) return rej(new Error('Could not load the export tool. It needs an internet connection.')); const s = document.createElement('script'); s.src = urls[i]; s.onload = res; s.onerror = () => { s.remove(); t(i + 1); }; document.head.appendChild(s); }; t(0); });
+const lj = urls => new Promise((res, rej) => { urls = [].concat(urls); const t = i => { if (i >= urls.length) return rej(new Error('Excel tools are not stored on this device yet. Connect once to load them, or save the file as CSV and import that.')); const s = document.createElement('script'); s.src = urls[i]; s.onload = res; s.onerror = () => { s.remove(); t(i + 1); }; document.head.appendChild(s); }; t(0); });
 const XLSX_URLS = ['https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js', 'https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js'];
 const clsList = id => '<datalist id="' + id + '">' + classes().map(c => '<option value="' + E(c) + '">').join('') + '</datalist>';
 const curYear = () => { const o = (D.yrs || []).find(y => y.status === 'open'); if (o) return o.name; const d = new Date(), y = d.getUTCFullYear(); return d.getUTCMonth() >= 8 ? y + '/' + (y + 1) : (y - 1) + '/' + y; };
@@ -719,13 +762,13 @@ function studentSheet(id) {
 }
 function pvPhoto(i) { const f = i.files[0]; if (f && $('sn_pv')) { const u = URL.createObjectURL(f); $('sn_pv').innerHTML = '<span class="av" style="width:64px;height:64px"><img alt="" src="' + u + '"></span>'; } }
 async function studentSave(id) {
-  if (!need()) return; const row = { student_no: val('sn_no'), full_name: val('sn_nm'), class_name: val('sn_cl'), gender: $('sn_g').value || null, dob: $('sn_dob').value || null, guardian_name: val('sn_gn') || null, guardian_phone: val('sn_gp') || null };
+  const row = { student_no: val('sn_no'), full_name: val('sn_nm'), class_name: val('sn_cl'), gender: $('sn_g').value || null, dob: $('sn_dob').value || null, guardian_name: val('sn_gn') || null, guardian_phone: val('sn_gp') || null };
   if (!row.student_no || !row.full_name || !row.class_name) return toast('Student ID, name and class are required.', 'bad');
   if (!id && D.students.some(s => String(s.student_no).toLowerCase() === row.student_no.toLowerCase())) return toast('That student ID is already used.', 'bad');
   const nid = id || crypto.randomUUID(), pf = $('sn_ph') && $('sn_ph').files[0];
   if (pf) { if (!online()) return toast('Photos need a connection. Save without the photo, or reconnect.', 'bad'); try { const b = await resizeImg(pf, 640, 'image/jpeg'), pth = sid() + '/' + nid + '-' + Date.now() + '.jpg', up = await sb.storage.from('photos').upload(pth, b, { contentType: 'image/jpeg' }); if (up.error) return toast('Photo upload failed: ' + friendly(up.error), 'bad'); row.photo_path = pth; } catch (e) { return toast(e.message, 'bad'); } }
-  const r = id ? await sb.from('students').update(row).eq('id', id) : await sb.from('students').insert(Object.assign({ id: nid, school_id: sid() }, row));
-  await saved(r, id ? 'Student updated.' : row.full_name + ' added.');
+  if (id) await tq('students', 'update', [row], { match: { id } }); else await tq('students', 'insert', [Object.assign({ id: nid, school_id: sid() }, row)]);
+  await qdone(id ? 'Student updated.' : row.full_name + ' added.');
 }
 
 /* ---------- assign fees (one student or a whole class) ---------- */
@@ -743,12 +786,12 @@ function feeMode(m) { FS.mode = m; [...$('fs_m').children].forEach(b => b.classL
 function feeTargets() { const cat = $('fs_k').value === 'Other' ? val('fs_ko') : $('fs_k').value, yr = val('fs_y'); let T = FS.mode === 'one' ? (FS.sid ? [stu(FS.sid)] : []) : D.students.filter(s => (!s.status || s.status === 'active') && (!$('fs_c').value || s.class_name === $('fs_c').value)); T = T.filter(s => s.id); const dup = T.filter(s => (FIDX[s.id] || []).some(f => f.category === cat && f.academic_year === yr)); return { T, dup, cat, yr, add: T.filter(s => !dup.includes(s)) }; }
 function feePrev() { const e = $('fs_p'); if (!e) return; const t = feeTargets(), a = toP($('fs_a').value); e.innerHTML = !t.T.length ? 'Choose who this fee is for.' : '<b>' + t.add.length + '</b> student' + (t.add.length === 1 ? '' : 's') + ' will get <b>' + E(t.cat || 'this fee') + '</b> for ' + E(t.yr || '…') + (a ? ' at <b>' + fm(a) + '</b> each, <b>' + fm(a * t.add.length) + '</b> in total' : '') + '.' + (t.dup.length ? '<div class="m" style="margin-top:4px">' + t.dup.length + ' already ha' + (t.dup.length === 1 ? 's' : 've') + ' this fee and will be skipped.</div>' : ''); }
 async function feeSave() {
-  if (!need()) return; const t = feeTargets(), a = toP($('fs_a').value);
+  const t = feeTargets(), a = toP($('fs_a').value);
   if (!t.cat) return toast('Enter the name of the fee.', 'bad'); if (!t.yr) return toast('Enter the academic year.', 'bad'); if (!a || a <= 0) return toast('Enter a valid amount.', 'bad'); if (!t.add.length) return toast(t.T.length ? 'Everyone selected already has this fee.' : 'Choose who this fee is for.', 'bad');
   if (t.add.length > 1 && !await askYes('Assign to ' + t.add.length + ' students?', t.cat + ' · ' + t.yr + ' · ' + fm(a) + ' each (' + fm(a * t.add.length) + ' in total).', 'Assign')) return;
-  $('fs_go').disabled = true; const rows = t.add.map(s => ({ school_id: sid(), student_id: s.id, category: t.cat, academic_year: t.yr, amount_minor: a }));
-  for (let i = 0; i < rows.length; i += 200) { const r = await sb.from('fee_items').insert(rows.slice(i, i + 200)); if (r.error) { $('fs_go').disabled = false; await pull(); return toast(friendly(r.error) + (i ? ' (' + i + ' were added before the error.)' : ''), 'bad'); } }
-  await saved({}, t.cat + ' assigned to ' + rows.length + ' student' + (rows.length > 1 ? 's' : '') + '.');
+  $('fs_go').disabled = true; const rows = t.add.map(s => ({ id: crypto.randomUUID(), school_id: sid(), student_id: s.id, category: t.cat, academic_year: t.yr, amount_minor: a }));
+  for (let i = 0; i < rows.length; i += 200) await tq('fee_items', 'insert', rows.slice(i, i + 200));
+  await qdone(t.cat + ' assigned to ' + rows.length + ' student' + (rows.length > 1 ? 's' : '') + '.');
 }
 
 /* ---------- import students ---------- */
@@ -772,9 +815,10 @@ async function impRead() {
   p.innerHTML = '<div class="card" style="box-shadow:none;margin-top:12px"><div class="row"><div class="t"><b class="pos">' + ok.length + ' ready to import</b></div></div>' + (dup.length ? '<div class="row"><div class="t m">' + dup.length + ' skipped: student ID already exists</div></div>' : '') + (bad.length ? '<div class="row"><div class="t m neg">' + bad.length + ' skipped: missing ID, name or class (rows ' + bad.slice(0, 8).join(', ') + (bad.length > 8 ? '…' : '') + ')</div></div>' : '') + ok.slice(0, 4).map(s => '<div class="row"><div class="t"><b>' + E(s.full_name) + '</b><span class="m">' + E(s.class_name) + ' · ' + E(s.student_no) + '</span></div></div>').join('') + (ok.length > 4 ? '<div class="m">…and ' + (ok.length - 4) + ' more</div>' : '') + '</div>' + (ok.length ? '<div class="btns"><button class="btn blk" id="im_go" onclick="impGo()">Import ' + ok.length + ' student' + (ok.length > 1 ? 's' : '') + '</button></div>' : '');
 }
 async function impGo() {
-  if (!need() || !IMP || !IMP.length) return; $('im_go').disabled = true; $('im_go').textContent = 'Importing…';
-  for (let i = 0; i < IMP.length; i += 200) { const r = await sb.from('students').upsert(IMP.slice(i, i + 200), { onConflict: 'school_id,student_no', ignoreDuplicates: true }); if (r.error) { await pull(); draw(true); return toast(friendly(r.error) + ' (' + i + ' imported before the error)', 'bad'); } }
-  const n = IMP.length; IMP = null; await saved({}, n + ' students imported.');
+  if (!IMP || !IMP.length) return; $('im_go').disabled = true; $('im_go').textContent = 'Importing…';
+  IMP.forEach(r => { r.id = crypto.randomUUID(); });
+  for (let i = 0; i < IMP.length; i += 200) await tq('students', 'upsert', IMP.slice(i, i + 200), { onConflict: 'school_id,student_no', ignoreDuplicates: true });
+  const n = IMP.length; IMP = null; await qdone(n + ' students imported.');
 }
 
 /* ---------- promote / status / photo / statement / reminder ---------- */
@@ -782,11 +826,11 @@ function promoSheet() {
   if (!canFee()) return; sheet('<h2>Promote a class</h2><div class="m">Moves every active student from one class to another, e.g. at the start of a new year.</div><label class="l" for="pr_f">From class</label><select class="in" id="pr_f" onchange="promoPrev()">' + classes().map(c => '<option>' + E(c) + '</option>').join('') + '</select><label class="l" for="pr_t">To class</label><input class="in" id="pr_t" list="cls_dl" placeholder="e.g. Basic 5A" oninput="promoPrev()">' + clsList('cls_dl') + '<div class="ins" id="pr_p" style="margin-top:12px">Choose both classes.</div><div class="btns"><button class="btn blk" onclick="promoGo()">Promote</button></div>', { after: promoPrev });
 }
 const promoPrev = () => { const f = $('pr_f').value, n = D.students.filter(s => s.class_name === f && (!s.status || s.status === 'active')).length; $('pr_p').innerHTML = '<b>' + n + '</b> active student' + (n === 1 ? '' : 's') + ' in ' + E(f) + ' will move to <b>' + E(val('pr_t') || '…') + '</b>.'; };
-async function promoGo() { if (!need()) return; const f = $('pr_f').value, t = val('pr_t'); if (!f || !t) return toast('Choose both classes.', 'bad'); if (f === t) return toast('Choose a different class.', 'bad'); if (!await askYes('Promote ' + f + ' to ' + t + '?', 'All active students in ' + f + ' will move to ' + t + '.', 'Promote')) return; await saved(await sb.from('students').update({ class_name: t }).eq('school_id', sid()).eq('class_name', f).eq('status', 'active'), 'Class promoted.'); }
+async function promoGo() { const f = $('pr_f').value, t = val('pr_t'); if (!f || !t) return toast('Choose both classes.', 'bad'); if (f === t) return toast('Choose a different class.', 'bad'); if (!await askYes('Promote ' + f + ' to ' + t + '?', 'All active students in ' + f + ' will move to ' + t + '.', 'Promote')) return; await tq('students', 'update', [{ class_name: t }], { match: { school_id: sid(), class_name: f, status: 'active' } }); await qdone('Class promoted.'); }
 function statusSheet(id) {
   const s = stu(id); sheet('<h2>' + E(s.full_name) + '</h2><label class="l" for="st_s">Status</label><select class="in" id="st_s">' + opts([['active', 'Active'], ['graduated', 'Graduated'], ['withdrawn', 'Withdrawn'], ['transferred', 'Transferred']], s.status || 'active') + '</select><label class="l" style="display:flex;gap:10px;align-items:center;margin-top:16px"><input type="checkbox" id="st_o" ' + (s.sms_opt_out ? 'checked' : '') + ' style="width:20px;height:20px"> Do not send SMS to this guardian</label><div class="btns"><button class="btn blk" onclick="statusSave(\'' + id + '\')">Save</button></div>');
 }
-async function statusSave(id) { if (!need()) return; await saved(await sb.from('students').update({ status: $('st_s').value, sms_opt_out: $('st_o').checked }).eq('id', id), 'Student updated.'); }
+async function statusSave(id) { await tq('students', 'update', [{ status: $('st_s').value, sms_opt_out: $('st_o').checked }], { match: { id } }); await qdone('Student updated.'); }
 function resizeImg(file, max, type) { return new Promise((res, rej) => { const im = new Image(), u = URL.createObjectURL(file); im.onload = () => { const k = Math.min(1, max / Math.max(im.width, im.height)), c = document.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); URL.revokeObjectURL(u); c.toBlob(b => b ? res(b) : rej(new Error('Could not process the image.')), type, .85); }; im.onerror = () => { URL.revokeObjectURL(u); rej(new Error('That file is not a usable image.')); }; im.src = u; }); }
 function photoSheet(id) { const s = stu(id); sheet('<h2>Photo · ' + E(s.full_name) + '</h2><div class="m">Take a picture or choose one. It is resized automatically.</div><label class="l" for="ph_f">Photo</label><input class="in" id="ph_f" type="file" accept="image/*"><div class="btns"><button class="btn blk" onclick="photoSave(\'' + id + '\')">Save photo</button></div>'); }
 async function photoSave(id) { if (!need()) return; const f = $('ph_f').files[0]; if (!f) return toast('Choose a photo first.', 'bad'); try { const b = await resizeImg(f, 640, 'image/jpeg'), p = sid() + '/' + id + '-' + Date.now() + '.jpg', u = await sb.storage.from('photos').upload(p, b, { contentType: 'image/jpeg' }); if (u.error) return toast('Upload failed: ' + friendly(u.error), 'bad'); await saved(await sb.from('students').update({ photo_path: p }).eq('id', id), 'Photo saved.'); } catch (e) { toast(e.message, 'bad'); } }
@@ -835,7 +879,7 @@ PAGES.accounts = function () {
     (D.acc.length ? '<div class="card"><h3>Cashbook</h3><select class="in" onchange="CA=this.value;draw(true)">' + opts(accO(), ca) + '</select><div style="margin-top:6px">' + (D.cb.filter(x => x.account_id === ca).slice(0, 60).map(x => rowH('', '<b>' + E(x.description) + '</b><span class="m">' + fd(x.entry_date) + ' · balance ' + fm(x.balance_minor) + '</span>', x.income_minor ? '<span class="pos">+' + fm(x.income_minor) + '</span>' : '<span class="neg">-' + fm(x.expense_minor) + '</span>')).join('') || empty('📒', 'No entries yet.')) + '</div></div>' : '');
 };
 function accSheet() { sheet('<h2>New account</h2>' + field('ac_n', 'Account name', 'e.g. School cash box') + '<div class="grid2"><div><label class="l" for="ac_t">Type</label><select class="in" id="ac_t">' + opts(Object.entries(ACCT)) + '</select></div><div><label class="l" for="ac_o">Opening balance</label><input class="in" id="ac_o" inputmode="decimal" placeholder="0.00"></div></div><label class="l" for="ac_m">Receives fee payments made by</label><select class="in" id="ac_m">' + opts([['', 'Nothing (not a fee account)']].concat(METHODS.map(m => [m, m + ' payments']))) + '</select><div class="btns"><button class="btn blk" onclick="accSave()">Create account</button></div>'); }
-async function accSave() { if (!need()) return; const n = val('ac_n'), o = toP(val('ac_o') || '0'); if (!n || o === null) return toast('Enter a name and a valid opening balance.', 'bad'); const id = crypto.randomUUID(), r = await sb.from('accounts').insert({ id, school_id: sid(), name: n, type: $('ac_t').value, opening_minor: o }); if (!r.error && $('ac_m').value) await sb.from('method_accounts').upsert({ school_id: sid(), method: $('ac_m').value, account_id: id }); await saved(r, 'Account created.'); }
+async function accSave() { const n = val('ac_n'), o = toP(val('ac_o') || '0'); if (!n || o === null) return toast('Enter a name and a valid opening balance.', 'bad'); const id = crypto.randomUUID(); await tq('accounts', 'insert', [{ id, school_id: sid(), name: n, type: $('ac_t').value, opening_minor: o }]); if ($('ac_m').value) await tq('method_accounts', 'upsert', [{ school_id: sid(), method: $('ac_m').value, account_id: id }]); await qdone('Account created.'); }
 function txSheet() { sheet('<h2>Deposit / withdrawal</h2><label class="l" for="tx_c">Account</label><select class="in" id="tx_c">' + opts(accO(), CA) + '</select><div class="seg" style="margin-top:12px" id="tx_k"><button class="on" onclick="txKind(this,\'deposit\')">Deposit</button><button onclick="txKind(this,\'withdrawal\')">Withdrawal</button></div><div class="grid2"><div><label class="l" for="tx_a">Amount (GH₵)</label><input class="in" id="tx_a" inputmode="decimal" placeholder="0.00"></div><div>' + field('tx_d', 'Date', '', 'type="date" value="' + td() + '"') + '</div></div>' + field('tx_n', 'Description', 'e.g. Bank deposit of fees') + '<div class="btns"><button class="btn blk" onclick="txSave()">Record</button></div>'); window.TXK = 'deposit'; }
 function txKind(b, k) { window.TXK = k; [...b.parentNode.children].forEach(x => x.classList.toggle('on', x === b)); }
 async function txSave() { if (!need()) return; const a = toP(val('tx_a')); if (!a || a <= 0) return toast('Enter a valid amount.', 'bad'); await saved(await sb.rpc('add_account_txn', { p_school: sid(), p_account: $('tx_c').value, p_kind: window.TXK, p_amount: a, p_date: $('tx_d').value || td(), p_desc: val('tx_n') || null }), 'Entry recorded.'); }
@@ -858,7 +902,7 @@ PAGES.suppliers = function () {
     '<div class="card" style="padding:6px 16px">' + (D.sbal.length ? D.sbal.map(s => rowH(avatar(s.name, 40), '<b>' + E(s.name) + '</b>', s.balance_minor > 0 ? '<span class="neg">' + fm(s.balance_minor) + '</span>' : '<span class="badge ok">Settled</span>')).join('') : empty('🚚', 'No suppliers yet.')) + '</div>';
 };
 function supSheet() { sheet('<h2>Add supplier</h2>' + field('sp_n', 'Supplier name', 'e.g. Kwame Stationery Ltd') + field('sp_p', 'Phone', 'Optional', 'inputmode="tel"') + '<div class="btns"><button class="btn blk" onclick="supSave()">Save</button></div>'); }
-async function supSave() { if (!need()) return; if (!val('sp_n')) return toast('Supplier name is required.', 'bad'); await saved(await sb.from('suppliers').insert({ school_id: sid(), name: val('sp_n'), phone: val('sp_p') || null }), 'Supplier added.'); }
+async function supSave() { if (!val('sp_n')) return toast('Supplier name is required.', 'bad'); await tq('suppliers', 'insert', [{ id: crypto.randomUUID(), school_id: sid(), name: val('sp_n'), phone: val('sp_p') || null }]); await qdone('Supplier added.'); }
 function supTxSheet() { sheet('<h2>Purchase / payment</h2><label class="l" for="sx_s">Supplier</label><select class="in" id="sx_s">' + opts(D.sup.map(s => [s.id, s.name])) + '</select><div class="seg" id="sx_k" style="margin-top:12px"><button class="on" onclick="txKind(this,\'purchase\');sxKind()">Bought on credit</button><button onclick="txKind(this,\'payment\');sxKind()">Paid supplier</button></div><div class="grid2"><div><label class="l" for="sx_a">Amount (GH₵)</label><input class="in" id="sx_a" inputmode="decimal" placeholder="0.00"></div><div>' + field('sx_d', 'Date', '', 'type="date" value="' + td() + '"') + '</div></div><div id="sx_ac" class="hide"><label class="l" for="sx_c">Paid from account</label><select class="in" id="sx_c">' + opts(accO()) + '</select></div>' + field('sx_r', 'Reference', 'Optional') + '<div class="btns"><button class="btn blk" onclick="supTxSave()">Record</button></div>'); window.TXK = 'purchase'; }
 const sxKind = () => $('sx_ac').classList.toggle('hide', window.TXK !== 'payment');
 async function supTxSave() { if (!need()) return; const a = toP(val('sx_a')), k = window.TXK; if (!a || a <= 0) return toast('Enter a valid amount.', 'bad'); if (k === 'payment' && !D.acc.length) return toast('Payments need an account. Create one first.', 'bad'); await saved(await sb.from('supplier_txns').insert({ school_id: sid(), supplier_id: $('sx_s').value, kind: k, amount_minor: a, paid_on: $('sx_d').value || td(), reference: val('sx_r') || null, account_id: k === 'payment' ? $('sx_c').value : null }), 'Entry recorded.'); }
@@ -871,9 +915,9 @@ PAGES.years = function () {
     ((D.cfw || []).length ? '<div class="card"><h3>Carry-forward history</h3>' + D.cfw.map(c => rowH('', '<b>' + E(c.from_year) + ' → ' + E(c.to_year) + '</b><span class="m">' + c.students_count + ' students · ' + fd(c.created_at) + '</span>', fm(c.total_minor))).join('') + '</div>' : '');
 };
 function yearSheet() { sheet('<h2>New academic year</h2>' + field('yr_n', 'Name', 'e.g. 2026/2027') + '<div class="grid2"><div>' + field('yr_s', 'Starts', '', 'type="date"') + '</div><div>' + field('yr_e', 'Ends', '', 'type="date"') + '</div></div><div class="btns"><button class="btn blk" onclick="yearSave()">Create year</button></div>'); }
-async function yearSave() { if (!need()) return; if (!val('yr_n') || !$('yr_s').value || !$('yr_e').value) return toast('Enter a name and both dates.', 'bad'); await saved(await sb.from('academic_years').insert({ school_id: sid(), name: val('yr_n'), start_date: $('yr_s').value, end_date: $('yr_e').value }), 'Academic year created.'); }
+async function yearSave() { if (!val('yr_n') || !$('yr_s').value || !$('yr_e').value) return toast('Enter a name and both dates.', 'bad'); await tq('academic_years', 'insert', [{ id: crypto.randomUUID(), school_id: sid(), name: val('yr_n'), start_date: $('yr_s').value, end_date: $('yr_e').value }]); await qdone('Academic year created.'); }
 function termSheet() { sheet('<h2>Add term</h2><label class="l" for="tm_y">Academic year</label><select class="in" id="tm_y">' + opts(D.yrs.map(y => [y.id, y.name])) + '</select>' + field('tm_n', 'Term name', 'e.g. Term 1') + '<div class="grid2"><div>' + field('tm_s', 'Starts', '', 'type="date"') + '</div><div>' + field('tm_e', 'Ends', '', 'type="date"') + '</div></div><div class="btns"><button class="btn blk" onclick="termSave()">Add term</button></div>'); }
-async function termSave() { if (!need()) return; if (!val('tm_n') || !$('tm_s').value || !$('tm_e').value) return toast('Enter a term name and both dates.', 'bad'); await saved(await sb.from('terms').insert({ school_id: sid(), year_id: $('tm_y').value, name: val('tm_n'), start_date: $('tm_s').value, end_date: $('tm_e').value }), 'Term added.'); }
+async function termSave() { if (!val('tm_n') || !$('tm_s').value || !$('tm_e').value) return toast('Enter a term name and both dates.', 'bad'); await tq('terms', 'insert', [{ id: crypto.randomUUID(), school_id: sid(), year_id: $('tm_y').value, name: val('tm_n'), start_date: $('tm_s').value, end_date: $('tm_e').value }]); await qdone('Term added.'); }
 async function closeYr(id) { if (!need() || !await askYes('Close this academic year?', 'You can still view its records.', 'Close year')) return; await saved(await sb.from('academic_years').update({ status: 'closed' }).eq('id', id), 'Year closed.', true); }
 function cfSheet() { const yo = D.yrs.map(y => [y.name, y.name]); sheet('<h2>Carry forward balances</h2><p class="m">Moves every unpaid balance from one year into a "balance brought forward" fee in the next. This happens once and cannot be undone.</p><label class="l" for="cf_f">From year</label><select class="in" id="cf_f">' + opts(yo) + '</select><label class="l" for="cf_t">To year</label><select class="in" id="cf_t">' + opts(yo, (yo[0] || [])[0]) + '</select><div class="btns"><button class="btn blk" onclick="cfGo()">Carry forward</button></div>'); }
 async function cfGo() { if (!need()) return; const f = $('cf_f').value, t = $('cf_t').value; if (!f || !t || f === t) return toast('Choose two different years.', 'bad'); if (!await askYes('Carry forward from ' + f + ' to ' + t + '?', 'This happens once and cannot be undone.', 'Carry forward', true)) return; const r = await sb.rpc('carry_forward', { p_school: sid(), p_from: f, p_to: t }); await saved(r, r.data + ' student balance(s) carried forward.'); }
@@ -996,7 +1040,7 @@ PAGES.sync = function () {
     '<div class="row"><div class="t"><b>Waiting to sync</b><span class="m">' + q.length + ' item' + (q.length === 1 ? '' : 's') + ' on this device</span></div></div>' +
     (D.loaded ? '<div class="row"><div class="t"><b>Last updated</b><span class="m">' + E(new Date(D.loaded).toLocaleString('en-GB', { timeZone: 'Africa/Accra' })) + '</span></div></div>' : '') +
     '<div class="btns"><button class="btn blk" onclick="sync()" ' + (busy || !on ? 'disabled' : '') + '>' + (busy ? 'Syncing…' : 'Sync now') + '</button></div></div>' +
-    (q.length ? '<div class="card"><h3>On this device</h3>' + q.map(x => rowH('', '<b>' + E(x.k === 'r' ? x.method : (x.k === 'x' ? 'Expense: ' + (x.description || '') : (x.amt ? fm(x.amt) + ' ' : '') + (x.method || 'Payment'))) + '</b><span class="m ' + (x.state === 'failed' ? 'neg' : '') + '">' + (x.state === 'failed' ? 'Failed: ' + E(x.err || 'rejected') : 'Waiting to sync') + '</span>', x.state === 'failed' ? '<button class="btn sm bad" onclick="dropFailed(\'' + x.id + '\')">Discard</button>' : '')).join('') + '</div>' : '') +
+    (q.length ? '<div class="card"><h3>On this device</h3>' + q.map(x => rowH('', '<b>' + E(x.k === 't' ? ({ students: 'Student', fee_items: 'Fees', accounts: 'Account', suppliers: 'Supplier', academic_years: 'Academic year', terms: 'Term', method_accounts: 'Account link' }[x.table] || x.table) + ' (' + x.rows.length + ')' : x.k === 'r' ? x.method : (x.k === 'x' ? 'Expense: ' + (x.description || '') : (x.amt ? fm(x.amt) + ' ' : '') + (x.method || 'Payment'))) + '</b><span class="m ' + (x.state === 'failed' ? 'neg' : '') + '">' + (x.state === 'failed' ? 'Failed: ' + E(x.err || 'rejected') : 'Waiting to sync') + '</span>', x.state === 'failed' ? '<button class="btn sm bad" onclick="dropFailed(\'' + x.id + '\')">Discard</button>' : '')).join('') + '</div>' : '') +
     '<div class="card"><h3>Account</h3><div class="row"><div class="t"><b>' + E((U && U.email) || '') + '</b><span class="m">' + E(ROLES[role()] || '') + ' · ' + E(D.school.name) + '</span></div></div><div class="btns"><button class="btn sec" onclick="changePwSheet()">Change password</button><button class="btn bad" onclick="signOut()">Sign out</button></div></div>';
 };
 
