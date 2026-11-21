@@ -74,10 +74,20 @@ function reindex() {
 const stu = id => SIDX[id] || {};
 const sn = id => (SIDX[id] || {}).full_name || 'Unknown student';
 const sid = () => D.school.id;
-const pend = fid => D.q.filter(q => !q.k && q.fee === fid && q.state !== 'done').reduce((t, q) => t + q.amt, 0);
+const pend = fid => D.q.filter(q => q.state === 'pending' && q.fee === fid && (!q.k || q.k === 'v')).reduce((t, q) => t + (q.k === 'v' ? -q.amt : q.amt), 0);
+function payRow(q) { const f = D.fees.find(x => x.fee_item_id === q.fee) || {}, v = q.k === 'v'; return { id: q.id, school_id: D.school && D.school.id, student_id: f.student_id, fee_item_id: q.fee, amount_minor: v ? -q.amt : q.amt, method: q.method, reference: q.ref || null, occurred_at: q.at, created_at: q.at, receipt_no: v ? null : 'TEMP-' + String(q.id).slice(0, 4).toUpperCase(), reversal_of: v ? q.orig : null, local: true }; }
+function applyPay(q) { if (D.pays.some(p => p.id === q.id)) return; D.pays.unshift(payRow(q)); }
+function pendAdj() { // what is saved on this device but not on the server yet
+  let c = 0, t = 0, e = 0, ns = 0, td0 = new Date().toISOString().slice(0, 10);
+  D.q.filter(q => q.state === 'pending').forEach(q => {
+    if (!q.k || q.k === 'v') { if (D.pays.some(p => p.id === q.id && !p.local)) return; const a = q.k === 'v' ? -q.amt : q.amt; c += a; if (String(q.at).slice(0, 10) === td0) t += a; }
+    else if (q.k === 't' && q.table === 'fee_items') (q.rows || []).forEach(r => { if (!D.fees.some(f => f.fee_item_id === r.id && !f.local)) e += r.amount_minor; });
+  });
+  ns = D.students.filter(s => s.local).length; return { c, t, e, ns, any: c || t || e || ns || D.q.some(q => q.state === 'pending') };
+}
 const bal = f => f.balance_minor - pend(f.fee_item_id);
 const sbal = id => (FIDX[id] || []).reduce((t, f) => t + bal(f), 0);
-const sPaid = id => (FIDX[id] || []).reduce((t, f) => t + f.paid_minor, 0);
+const sPaid = id => (FIDX[id] || []).reduce((t, f) => t + f.paid_minor + pend(f.fee_item_id), 0);
 const sDue = id => (FIDX[id] || []).reduce((t, f) => t + (f.carried_to ? f.paid_minor : f.amount_minor), 0);
 const role = () => (D.school || {}).role;
 const canPay = () => ['proprietor', 'admin', 'accountant', 'account_officer'].includes(role());
@@ -148,10 +158,10 @@ function applyLocal(q) {
   const lst = { accounts: 'acc', suppliers: 'sup', academic_years: 'yrs', terms: 'trm', method_accounts: 'ma' }[T];
   if (T === 'students') {
     if (q.op === 'update') D.students.forEach(s => { if (tmatch(s, q.match)) Object.assign(s, rows[0]); });
-    else rows.forEach(r => { if (D.students.some(s => s.id === r.id || (q.op === 'upsert' && String(s.student_no).toLowerCase() === String(r.student_no).toLowerCase()))) return; D.students.push(Object.assign({ status: 'active', sms_opt_out: false, created_at: nowI }, r)); });
+    else rows.forEach(r => { if (D.students.some(s => s.id === r.id || (q.op === 'upsert' && String(s.student_no).toLowerCase() === String(r.student_no).toLowerCase()))) return; D.students.push(Object.assign({ status: 'active', sms_opt_out: false, created_at: nowI, local: true }, r)); });
     D.students.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
   } else if (T === 'fee_items') {
-    rows.forEach(r => { if (D.fees.some(f => f.fee_item_id === r.id)) return; D.fees.push({ school_id: r.school_id, fee_item_id: r.id, student_id: r.student_id, category: r.category, academic_year: r.academic_year, amount_minor: r.amount_minor, carried_to: null, paid_minor: 0, balance_minor: r.amount_minor }); });
+    rows.forEach(r => { if (D.fees.some(f => f.fee_item_id === r.id)) return; D.fees.push({ school_id: r.school_id, fee_item_id: r.id, student_id: r.student_id, category: r.category, academic_year: r.academic_year, amount_minor: r.amount_minor, carried_to: null, paid_minor: 0, balance_minor: r.amount_minor, local: true }); });
   } else if (T === 'accounts') {
     rows.forEach(r => { if (!D.acc.some(a => a.id === r.id)) { D.acc.push(Object.assign({ created_at: nowI }, r)); D.accb.push({ account_id: r.id, school_id: r.school_id, balance_minor: r.opening_minor || 0 }); } });
   } else if (T === 'suppliers') {
@@ -162,7 +172,7 @@ function applyLocal(q) {
     rows.forEach(r => { if (!D[lst].some(a => a.id === r.id)) D[lst].push(Object.assign({ created_at: nowI }, r)); });
   }
 }
-function overlay() { D.q.filter(q => q.k === 't' && q.state !== 'done' && q.state !== 'failed').forEach(applyLocal); }
+function overlay() { D.q.filter(q => q.state === 'pending').forEach(q => { if (q.k === 't') applyLocal(q); else if (!q.k || q.k === 'v') applyPay(q); }); }
 async function tq(table, op, rows, o) { // save on this device now, send when online
   o = o || {}; const item = { k: 't', id: crypto.randomUUID(), table, op, rows, match: o.match || null, onConflict: o.onConflict || null, ignoreDuplicates: !!o.ignoreDuplicates, label: o.label || table, at: new Date().toISOString(), state: 'pending' };
   D.q.push(item); applyLocal(item); reindex(); await kv.set('q', D.q); await saveCache();
@@ -183,6 +193,7 @@ async function sync(quiet) {
       try {
         if (q.k === 'r') r = await sb.rpc('queue_reminders', { p_school: sid(), p_students: q.ids, p_template: q.tpl, p_when: q.when || null });
         else if (q.k === 't') r = await sendT(q);
+        else if (q.k === 'v') r = await sb.rpc('reverse_payment', { p_id: q.orig, p_reverse_id: q.id, p_reason: q.reason }); 
         else if (q.k === 'x') r = await sb.from('expenses').upsert(q.row, { onConflict: 'id', ignoreDuplicates: true });
         else r = await sb.rpc('record_payment', { p_id: q.id, p_fee_item: q.fee, p_amount: q.amt, p_method: q.method, p_ref: q.ref || null, p_occurred: q.at, p_device: devId });
       } catch (e) { r = { error: e }; }
@@ -196,7 +207,7 @@ async function sync(quiet) {
   } catch (e) { if (!quiet && !isNetErr(e)) toast(friendly(e), 'bad'); }
   busy = false; draw(); if (window.afterSync) window.afterSync();
 }
-async function enqueue(item) { D.q.push(item); await kv.set('q', D.q); draw(); if (online()) await sync(true); }
+async function enqueue(item) { D.q.push(item); if (!item.k || item.k === 'v') { applyPay(item); reindex(); await saveCache(); } await kv.set('q', D.q); draw(); if (online()) await sync(true); }
 function dropFailed(id) { D.q = D.q.filter(q => q.id !== id); kv.set('q', D.q); draw(); }
 
 /* ---------- auth ---------- */
@@ -504,9 +515,10 @@ const waNum = p => { p = String(p || '').replace(/\D/g, ''); if (!p) return ''; 
 const exF = f => f.carried_to ? f.paid_minor : f.amount_minor;
 const netByDay = n => { const m = {}; D.pays.forEach(p => { const d = p.occurred_at.slice(0, 10); m[d] = (m[d] || 0) + p.amount_minor; }); return [...Array(n).keys()].map(i => { const dt = new Date(Date.now() - (n - 1 - i) * 864e5), k = dt.toISOString().slice(0, 10); return { l: dt.getUTCDate() + ' ' + MON[dt.getUTCMonth()], v: Math.max(0, m[k] || 0), k }; }); };
 function stats() {
-  const d = D.dash, F = D.fees, St = D.students.filter(s => s.status === 'active' || !s.status), T = d ? d.expected_minor : sum(F, exF), C = d ? d.collected_minor : sum(F, f => f.paid_minor);
+  const d = D.dash, F = D.fees, St = D.students.filter(s => s.status === 'active' || !s.status), A = pendAdj();
+  const T = d ? d.expected_minor + A.e : sum(F, exF), C = d ? d.collected_minor + A.c : sum(F, f => f.paid_minor + pend(f.fee_item_id));
   const owing = St.filter(s => sbal(s.id) > 0);
-  return { d, T, C, O: Math.max(0, d ? d.outstanding_minor : T - C), rate: pct(C, T), ns: d ? d.students : St.length, ow: d ? d.owing : owing.length, od: d ? (d.overdue || 0) : 0 };
+  return { d, T, C, O: Math.max(0, d ? d.outstanding_minor + A.e - A.c : T - C), rate: pct(C, T), today: d && d.today_minor != null ? d.today_minor + A.t : null, ns: d && !A.any ? d.students : St.length, ow: d && !A.any ? d.owing : owing.length, od: d ? (d.overdue || 0) : 0 };
 }
 const checklist = () => {
   const st = [['Create your school', true], ['Add your students', D.students.length > 0], ['Assign fees to students', D.fees.length > 0], ['Record the first payment', D.pays.some(p => p.amount_minor > 0)]];
@@ -514,7 +526,7 @@ const checklist = () => {
   return '<div class="card"><h3>Get started</h3>' + st.map(x => '<div class="row"><span class="badge ' + (x[1] ? 'ok' : 'mut') + '" style="width:26px;text-align:center">' + (x[1] ? '✓' : '·') + '</span><div class="t ' + (x[1] ? 'm' : 'b') + '">' + x[0] + '</div></div>').join('') + '<div class="btns">' + (!D.students.length ? '<button class="btn" onclick="studentSheet()">Add a student</button><button class="btn sec" onclick="importSheet()">Import from Excel</button>' : !D.fees.length ? '<button class="btn" onclick="feeSheet()">Assign fees</button>' : '<button class="btn gold" onclick="paySheet()">Record a payment</button>') + '</div></div>';
 };
 PAGES.home = function () {
-  const S = stats(), P = D.pays, t = td(), tp = P.filter(p => p.occurred_at.slice(0, 10) === t), tm = S.d && S.d.today_minor != null ? S.d.today_minor : sum(tp, p => p.amount_minor), hr = new Date().getUTCHours(), gr = hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
+  const S = stats(), P = D.pays, t = td(), tp = P.filter(p => p.occurred_at.slice(0, 10) === t), tm = S.today != null ? S.today : sum(tp, p => p.amount_minor), hr = new Date().getUTCHours(), gr = hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
   const nm = U && U.email ? U.email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
   const days = netByDay(14).map(x => x.v), tr = netByDay(SV.days);
   const q = [];
@@ -548,7 +560,7 @@ async function askAI() {
 }
 function recRow(p) {
   const rev = p.amount_minor < 0;
-  return rowH(avs(p.student_id, 40), '<b>' + E(sn(p.student_id)) + '</b><span class="m">' + E(p.receipt_no || 'Reversal') + ' · ' + E(p.method) + ' · ' + fd(p.occurred_at) + '</span>', '<span class="' + (rev ? 'neg' : '') + '">' + fm(p.amount_minor) + '</span>', p.receipt_no ? 'receiptSheet(\'' + p.id + '\')' : '');
+  return rowH(avs(p.student_id, 40), '<b>' + E(sn(p.student_id)) + '</b><span class="m">' + E(p.receipt_no || 'Reversal') + ' · ' + E(p.method) + ' · ' + fd(p.occurred_at) + (p.local ? ' · saved on this device' : '') + '</span>', '<span class="' + (rev ? 'neg' : '') + '">' + fm(p.amount_minor) + '</span>', p.receipt_no ? 'receiptSheet(\'' + p.id + '\')' : '');
 }
 
 /* ---------- students ---------- */
@@ -593,7 +605,7 @@ PAGES.student = function (r) {
     '<div class="btns">' + (canPay() && F.some(f => bal(f) > 0) ? '<button class="btn gold" onclick="paySheet(\'' + s.id + '\')">Record payment</button>' : '') + (canFee() ? '<button class="btn sec" onclick="feeSheet(\'' + s.id + '\')">Assign fee</button>' : '') + '</div></div>' +
     '<div class="card"><h3>Guardian</h3>' + (s.guardian_name || s.guardian_phone ? '<div class="kv"><span>Name</span><span>' + E(s.guardian_name || '—') + '</span></div><div class="kv"><span>Phone</span><span>' + E(s.guardian_phone || '—') + '</span></div>' + (s.sms_opt_out ? '<div class="m">SMS reminders are switched off for this guardian.</div>' : '') : '<div class="m">No guardian details yet.</div>') +
     (ph ? '<div class="btns"><a class="btn sec sm" href="tel:+' + ph + '">' + ico('phone', 16) + ' Call</a><a class="btn sec sm" target="_blank" rel="noopener" href="https://wa.me/' + ph + '?text=' + encodeURIComponent('Dear ' + (s.guardian_name || 'Parent') + ', ' + (b > 0 ? 'this is a friendly reminder that ' + s.full_name + ' has an outstanding school fee balance of GHS ' + fmn(b) + '. Kindly contact ' + D.school.name + ' for payment arrangements. Thank you.' : 'greetings from ' + D.school.name + '.')) + '">' + ico('chat', 16) + ' WhatsApp</a>' + (canFee() && b > 0 ? '<button class="btn sec sm" onclick="remindOne(\'' + s.id + '\')">💬 SMS reminder</button>' : '') + '</div>' : '') + '</div>' +
-    '<div class="card"><h3>Fees</h3>' + (F.length ? F.slice().sort((a, c) => String(c.academic_year).localeCompare(String(a.academic_year))).map(f => { const bb = bal(f); return '<div class="row"><div class="t"><b>' + E(f.category) + '</b><span class="m">' + E(f.academic_year) + (f.carried_to ? ' · carried to ' + E(f.carried_to) : '') + ' · ' + fm(f.paid_minor) + ' of ' + fm(f.amount_minor) + '</span><div class="bar"><i style="width:' + pct(f.paid_minor, f.amount_minor) + '%"></i></div></div><div class="v">' + (bb > 0 ? '<div class="neg">' + fm(bb) + '</div>' + (canPay() ? '<button class="btn sm" style="margin-top:6px" onclick="paySheet(\'' + s.id + '\',\'' + f.fee_item_id + '\')">Pay</button>' : '') : '<span class="badge ok">Paid</span>') + '</div></div>'; }).join('') : empty('🏷️', 'No fees assigned yet.', canFee() ? '<button class="btn" onclick="feeSheet(\'' + s.id + '\')">Assign a fee</button>' : '')) + '</div>' +
+    '<div class="card"><h3>Fees</h3>' + (F.length ? F.slice().sort((a, c) => String(c.academic_year).localeCompare(String(a.academic_year))).map(f => { const bb = bal(f); return '<div class="row"><div class="t"><b>' + E(f.category) + '</b><span class="m">' + E(f.academic_year) + (f.carried_to ? ' · carried to ' + E(f.carried_to) : '') + ' · ' + fm(f.paid_minor + pend(f.fee_item_id)) + ' of ' + fm(f.amount_minor) + '</span><div class="bar"><i style="width:' + pct(f.paid_minor + pend(f.fee_item_id), f.amount_minor) + '%"></i></div></div><div class="v">' + (bb > 0 ? '<div class="neg">' + fm(bb) + '</div>' + (canPay() ? '<button class="btn sm" style="margin-top:6px" onclick="paySheet(\'' + s.id + '\',\'' + f.fee_item_id + '\')">Pay</button>' : '') : '<span class="badge ok">Paid</span>') + '</div></div>'; }).join('') : empty('🏷️', 'No fees assigned yet.', canFee() ? '<button class="btn" onclick="feeSheet(\'' + s.id + '\')">Assign a fee</button>' : '')) + '</div>' +
     '<div class="card"><h3>Payments</h3><div id="stu_pays">' + stuPaysHTML(D.pays.filter(p => p.student_id === s.id)) + '</div></div>' +
     (canPay() ? '<div class="card"><h3>Manage</h3><div class="btns" style="margin-top:0"><button class="btn sec" onclick="studentSheet(\'' + s.id + '\')">Edit details</button><button class="btn sec" onclick="photoSheet(\'' + s.id + '\')">Photo</button><button class="btn sec" onclick="statementSheet(\'' + s.id + '\')">Statement</button>' + (canFee() ? '<button class="btn sec" onclick="statusSheet(\'' + s.id + '\')">Status &amp; SMS</button>' : '') + '</div></div>' : '<div class="btns"><button class="btn sec" onclick="statementSheet(\'' + s.id + '\')">Statement</button></div>');
 };
@@ -601,17 +613,17 @@ const stuPaysHTML = L => L.length ? L.slice(0, 60).map(p => recRow(p)).join('') 
 async function stuHistory(id) {
   const s = stu(id);
   if (!online()) return;
-  try { const P = await all(() => sb.from('payments').select('*').eq('student_id', id).order('occurred_at', { ascending: false }).order('id')); const e = $('stu_pays'); if (e) e.innerHTML = stuPaysHTML(P); } catch (e) { }
+  try { let P = await all(() => sb.from('payments').select('*').eq('student_id', id).order('occurred_at', { ascending: false }).order('id')); P = D.pays.filter(p => p.local && p.student_id === id && !P.some(x => x.id === p.id)).concat(P); const e = $('stu_pays'); if (e) e.innerHTML = stuPaysHTML(P); } catch (e) { }
 }
 
 /* ---------- payments page ---------- */
 PAGES.payments = function () {
-  const pq = D.q.filter(x => !x.k && x.state !== 'done'), q = (SV.pq || '').toLowerCase();
+  const pq = D.q.filter(x => !x.k && x.state === 'failed'), q = (SV.pq || '').toLowerCase();
   const L = D.pays.filter(p => !q || String(p.receipt_no || '').toLowerCase().includes(q) || sn(p.student_id).toLowerCase().includes(q) || String(p.method || '').toLowerCase().includes(q));
   let last = '', h = '';
   L.slice(0, SV.pmore || 80).forEach(p => { const d = p.occurred_at.slice(0, 10), lab = d === td() ? 'Today' : d === new Date(Date.now() - 864e5).toISOString().slice(0, 10) ? 'Yesterday' : fd(d); if (lab !== last) { h += '<div class="m b" style="margin:14px 0 2px">' + lab + '</div>'; last = lab; } h += recRow(p); });
   return '<h2 class="ph">Payments</h2><div class="sub">Receipts for the last 4 months</div>' + (canPay() ? '<div class="btns" style="margin:0 0 10px"><button class="btn gold" onclick="paySheet()">＋ Record payment</button><button class="btn sec" onclick="exportPayments()">📤 Export</button></div>' : '') +
-    (pq.length ? '<div class="card"><h3>Waiting to sync</h3>' + pq.map(q => rowH('<span class="badge ' + (q.state === 'failed' ? 'bad' : 'warn') + '">' + (q.state === 'failed' ? 'Failed' : 'Pending') + '</span>', '<b>' + E(sn((D.fees.find(f => f.fee_item_id === q.fee) || {}).student_id)) + '</b><span class="m">' + E(q.method) + (q.err ? ' · ' + E(q.err) : ' · saved on this device') + '</span>', fm(q.amt))).join('') + '</div>' : '') +
+    (pq.length ? '<div class="card"><h3>Needs attention</h3>' + pq.map(q => rowH('<span class="badge ' + (q.state === 'failed' ? 'bad' : 'warn') + '">' + (q.state === 'failed' ? 'Failed' : 'Pending') + '</span>', '<b>' + E(sn((D.fees.find(f => f.fee_item_id === q.fee) || {}).student_id)) + '</b><span class="m">' + E(q.method) + (q.err ? ' · ' + E(q.err) : ' · saved on this device') + '</span>', fm(q.amt))).join('') + '</div>' : '') +
     '<div class="srch">' + ico('search') + '<input class="in" id="pq" placeholder="Search receipt number or student" value="' + E(SV.pq || '') + '" oninput="SV.pq=this.value;payRefresh()" autocomplete="off"></div><div class="card" style="padding:6px 16px" id="pay_list">' + (h || empty('🧾', 'No payments found.')) + (L.length > (SV.pmore || 80) ? '<div class="btns"><button class="btn sec" onclick="SV.pmore=(SV.pmore||80)+100;draw(true)">Show more</button></div>' : '') + '</div>';
 };
 const payRefresh = () => { const f = $('pq'); const p = $('pay_list'); if (p) { const keep = f && f.value; draw(true); const n = $('pq'); if (n) { n.focus(); n.setSelectionRange(keep.length, keep.length); } } };
@@ -647,34 +659,56 @@ async function payConfirm() {
   const cur = D.q.find(q => q.id === item.id), p = cur && cur.state === 'done' && cur.receipt ? D.pays.find(x => x.receipt_no === cur.receipt) : null;
   if (p) { toast('Payment recorded · ' + p.receipt_no, 'ok'); return receiptSheet(p.id); }
   if (cur && cur.state === 'failed') { sheet('<h2>Could not record</h2><p class="neg b">' + E(cur.err) + '</p><div class="btns"><button class="btn sec" onclick="dropFailed(\'' + item.id + '\');closeSheet()">Discard</button><button class="btn" onclick="closeSheet();go(\'sync\')">Review</button></div>'); return; }
-  sheet('<div class="c" style="padding:14px 0"><div style="font-size:46px">📥</div><h2 style="padding:0">Saved on this device</h2><p class="m">' + fm(a) + ' for ' + E(sName) + '. It will get its receipt number when you are back online.</p><div class="btns"><button class="btn sec" onclick="closeSheet()">Done</button><button class="btn" onclick="paySheet()">Record another</button></div></div>');
+  toast('Payment saved on this device.', 'ok'); return receiptSheet(item.id);
 }
 
 /* ---------- receipt ---------- */
 function rcCalc(p, hist) {
   const f = D.fees.find(x => x.fee_item_id === p.fee_item_id); if (!f) return null;
-  const H = hist || D.pays.filter(x => x.fee_item_id === p.fee_item_id), later = sum(H.filter(x => x.created_at > p.created_at), x => x.amount_minor);
-  const after = f.balance_minor + later + 0; return { f, after: Math.max(0, after), before: Math.max(0, after + p.amount_minor) };
+  const H = hist || D.pays.filter(x => x.fee_item_id === p.fee_item_id && (p.local || !x.local)), later = sum(H.filter(x => x.created_at > p.created_at), x => x.amount_minor);
+  const base = p.local ? bal(f) : f.balance_minor, after = base + later; return { f, after: Math.max(0, after), before: Math.max(0, after + p.amount_minor) };
 }
 async function receiptSheet(id) {
   const p = D.pays.find(x => x.id === id); if (!p) return;
-  let hist = null; if (online()) { try { hist = await all(() => sb.from('payments').select('*').eq('fee_item_id', p.fee_item_id).order('created_at').order('id')); } catch (e) { } }
+  let hist = null; if (online() && !p.local) { try { hist = await all(() => sb.from('payments').select('*').eq('fee_item_id', p.fee_item_id).order('created_at').order('id')); } catch (e) { } }
   const c = rcCalc(p, hist), s = stu(p.student_id), rev = D.pays.some(x => x.reversal_of === p.id), neg = p.amount_minor < 0;
-  const url = location.origin + '/verify/?r=' + encodeURIComponent(p.receipt_no || '');
+  const url = p.local ? '' : location.origin + '/verify/?r=' + encodeURIComponent(p.receipt_no || '');
   const logo = D.school.logo ? sb.storage.from('logos').getPublicUrl(D.school.logo).data.publicUrl : '';
   sheet('<h2>' + (neg ? 'Reversal' : 'Receipt') + '</h2><div class="rc"><div class="h">' + (logo ? '<img alt="" src="' + E(logo) + '">' : '<span class="logo">F</span>') + '<div class="t"><b>' + E(D.school.name) + '</b><div class="m">' + E([D.school.address, D.school.phone].filter(Boolean).join(' · ')) + '</div></div></div>' +
     '<div class="m" style="margin-top:10px">Receipt no.</div><b>' + E(p.receipt_no || '—') + '</b><div class="big">' + fm(Math.abs(p.amount_minor)) + '</div><div class="m" style="font-style:italic">' + E(words(p.amount_minor)) + '</div>' +
     '<div style="margin-top:10px"><div class="kv"><span>Student</span><span>' + E(sn(p.student_id)) + '</span></div><div class="kv"><span>Class</span><span>' + E(s.class_name || '') + '</span></div>' + (c ? '<div class="kv"><span>Fee</span><span>' + E(c.f.category) + ' · ' + E(c.f.academic_year) + '</span></div>' : '') + '<div class="kv"><span>Date</span><span>' + fdt(p.occurred_at) + '</span></div><div class="kv"><span>Paid by</span><span>' + E(p.method) + (p.reference ? ' · ' + E(p.reference) : '') + '</span></div>' + (c ? '<div class="kv"><span>Balance before</span><span>' + fm(c.before) + '</span></div><div class="kv"><span>Balance after</span><span class="b">' + fm(c.after) + '</span></div>' : '') + '</div>' +
-    (rev ? '<div class="rv">THIS PAYMENT WAS REVERSED</div>' : '') + '<div class="m" style="margin-top:10px;word-break:break-all">Verify this receipt: ' + E(url) + '</div></div>' +
-    '<div class="btns np"><button class="btn" onclick="rcPDF(\'' + p.id + '\')">' + ico('down', 18) + ' Save PDF</button><button class="btn sec" onclick="window.print()">' + ico('print', 18) + ' Print</button></div><div class="btns np" style="margin-top:0"><button class="btn sec" onclick="rcWA(\'' + p.id + '\')">' + ico('chat', 18) + ' WhatsApp</button></div><div class="btns np" style="margin-top:0">' + (canFee() ? '<button class="btn sec" onclick="rcSMS(\'' + p.id + '\')">SMS guardian</button>' : '') + (canFee() && !rev && !neg ? '<button class="btn bad" onclick="rcRev(\'' + p.id + '\')">Reverse payment</button>' : '') + '</div>', { wide: true });
+    (rev ? '<div class="rv">THIS PAYMENT WAS REVERSED</div>' : '') + (p.local ? '<div class="m" style="margin-top:10px"><b>Provisional receipt.</b> Saved on this device. The official receipt number is issued when this device syncs.</div>' : '<div class="m" style="margin-top:10px;word-break:break-all">Verify this receipt: ' + E(url) + '</div>') + '</div>' +
+    '<div class="btns np"><button class="btn" onclick="rcPDF(\'' + p.id + '\')">' + ico('down', 18) + ' Save PDF</button><button class="btn sec" onclick="window.print()">' + ico('print', 18) + ' Print</button></div><div class="btns np" style="margin-top:0"><button class="btn sec" onclick="rcWA(\'' + p.id + '\')">' + ico('chat', 18) + ' WhatsApp</button></div><div class="btns np" style="margin-top:0">' + (canFee() ? '<button class="btn sec" onclick="rcSMS(\'' + p.id + '\')">SMS guardian</button>' : '') + (canFee() && !rev && !neg ? '<button class="btn sec" onclick="rcFixSheet(\'' + p.id + '\')">Correct payment</button><button class="btn bad" onclick="rcRev(\'' + p.id + '\')">' + (p.local ? 'Cancel payment' : 'Reverse payment') + '</button>' : '') + '</div>', { wide: true });
 }
-function rcWA(id) { const p = D.pays.find(x => x.id === id), c = rcCalc(p), s = stu(p.student_id), n = waNum(s.guardian_phone); const t = 'Receipt ' + p.receipt_no + ' from ' + D.school.name + ': ' + fm(p.amount_minor) + ' received for ' + s.full_name + (c ? '. Balance: ' + fm(c.after) : '') + '. Verify: ' + location.origin + '/verify/?r=' + encodeURIComponent(p.receipt_no); window.open('https://wa.me/' + n + '?text=' + encodeURIComponent(t), '_blank', 'noopener'); }
-async function rcSMS(id) { if (!online()) return toast('SMS needs a connection.', 'bad'); const p = D.pays.find(x => x.id === id), c = rcCalc(p); const body = 'Receipt ' + p.receipt_no + ': GHS ' + fmn(p.amount_minor) + ' received for ' + sn(p.student_id) + (c ? '. Balance GHS ' + fmn(c.after) : '') + '. ' + D.school.name; const r = await sb.rpc('queue_sms', { p_school: sid(), p_student: p.student_id, p_kind: 'receipt', p_body: body, p_key: 'rcpt:' + p.id }); toast(r.error ? friendly(r.error) : (r.data ? 'SMS queued. The server will send it.' : 'Not queued: no guardian phone, opted out, or already queued.'), r.error ? 'bad' : 'ok'); }
+function rcWA(id) { const p = D.pays.find(x => x.id === id), c = rcCalc(p), s = stu(p.student_id), n = waNum(s.guardian_phone); const t = (p.local ? 'Provisional receipt ' : 'Receipt ') + p.receipt_no + ' from ' + D.school.name + ': ' + fm(p.amount_minor) + ' received for ' + s.full_name + (c ? '. Balance: ' + fm(c.after) : '') + (p.local ? '' : '. Verify: ' + location.origin + '/verify/?r=' + encodeURIComponent(p.receipt_no)); window.open('https://wa.me/' + n + '?text=' + encodeURIComponent(t), '_blank', 'noopener'); }
+async function rcSMS(id) { if (!online()) return toast('SMS needs a connection.', 'bad'); const p = D.pays.find(x => x.id === id), c = rcCalc(p); if (p.local) return toast('Wait for this payment to sync first.', 'bad'); const body = 'Receipt ' + p.receipt_no + ': GHS ' + fmn(p.amount_minor) + ' received for ' + sn(p.student_id) + (c ? '. Balance GHS ' + fmn(c.after) : '') + '. ' + D.school.name; const r = await sb.rpc('queue_sms', { p_school: sid(), p_student: p.student_id, p_kind: 'receipt', p_body: body, p_key: 'rcpt:' + p.id }); toast(r.error ? friendly(r.error) : (r.data ? 'SMS queued. The server will send it.' : 'Not queued: no guardian phone, opted out, or already queued.'), r.error ? 'bad' : 'ok'); }
+async function revDo(p, why) { // works with no internet
+  if (busy) { toast('Syncing right now. Try again in a moment.', 'bad'); return false; }
+  const q = D.q.find(x => x.id === p.id && !x.k && x.state !== 'done');
+  if (q) { D.q = D.q.filter(x => x !== q); D.pays = D.pays.filter(x => x.id !== p.id); reindex(); await kv.set('q', D.q); await saveCache(); return true; }
+  await enqueue({ k: 'v', id: crypto.randomUUID(), orig: p.id, fee: p.fee_item_id, amt: p.amount_minor, method: p.method, reason: why, at: new Date().toISOString(), state: 'pending' }); return true;
+}
 async function rcRev(id) {
-  if (!online()) return toast('Reversal needs a connection.', 'bad');
-  const why = await askText('Reverse this payment', 'Reason (required). The original receipt is kept.', 'Reverse'); if (!why || !why.trim()) return;
-  const r = await sb.rpc('reverse_payment', { p_id: id, p_reverse_id: crypto.randomUUID(), p_reason: why.trim() }); if (r.error) return toast(friendly(r.error), 'bad');
-  toast('Reversal recorded. The original is kept.', 'ok'); closeSheet(true); await pull(); draw(true);
+  const p = D.pays.find(x => x.id === id); if (!p) return;
+  const why = await askText(p.local ? 'Cancel this payment' : 'Reverse this payment', 'Reason (required). ' + (p.local ? 'It has not reached the server yet, so it is simply removed.' : 'The original receipt is kept.'), p.local ? 'Cancel payment' : 'Reverse'); if (!why || !why.trim()) return;
+  if (!await revDo(p, why.trim())) return;
+  toast(p.local ? 'Payment cancelled.' : 'Reversal recorded. The original is kept.', 'ok'); closeSheet(true); draw(true);
+}
+function rcFixSheet(id) {
+  const p = D.pays.find(x => x.id === id); if (!p) return; const f = D.fees.find(x => x.fee_item_id === p.fee_item_id) || {};
+  sheet('<h2>Correct payment</h2><div class="m">' + E(sn(p.student_id)) + ' · ' + E(f.category || '') + '. The old entry is reversed and a new one is recorded. Both stay in the history.</div>' +
+    field('fx_a', 'Correct amount (GH₵)', '0.00', 'inputmode="decimal" value="' + (p.amount_minor / 100).toFixed(2) + '"') +
+    '<label class="l" for="fx_m">Paid by</label><select class="in" id="fx_m">' + opts(['Cash', 'Mobile Money', 'Bank Transfer', 'Cheque'].map(m => [m, m]), p.method) + '</select>' +
+    field('fx_r', 'Reference (optional)', '', 'value="' + E(p.reference || '') + '"') + field('fx_w', 'What was wrong? (required)', 'e.g. typed 500 instead of 50') +
+    '<div class="btns"><button class="btn" onclick="rcFix(\'' + p.id + '\')">Save correction</button></div>');
+}
+async function rcFix(id) {
+  const p = D.pays.find(x => x.id === id); if (!p) return; const a = toP($('fx_a').value), m = $('fx_m').value, ref = val('fx_r'), why = val('fx_w');
+  if (!a || a <= 0) return toast('Enter a valid amount.', 'bad'); if (why.length < 3) return toast('Say what was wrong.', 'bad');
+  if (a === p.amount_minor && m === p.method && ref === (p.reference || '')) return toast('Nothing was changed.', 'bad');
+  if (!await revDo(p, why)) return;
+  await enqueue({ id: crypto.randomUUID(), fee: p.fee_item_id, amt: a, method: m, ref: ref, at: p.occurred_at, state: 'pending' });
+  toast('Payment corrected.', 'ok'); closeSheet(true); draw(true);
 }
 
 /* ---------- search + account ---------- */
@@ -717,7 +751,7 @@ function miniPDF(rows, boxes) {
 }
 async function rcPDF(id) {
   const p = D.pays.find(x => x.id === id); if (!p) return;
-  let hist = null; if (online()) { try { hist = await all(() => sb.from('payments').select('*').eq('fee_item_id', p.fee_item_id).order('created_at').order('id')); } catch (e) { } }
+  let hist = null; if (online() && !p.local) { try { hist = await all(() => sb.from('payments').select('*').eq('fee_item_id', p.fee_item_id).order('created_at').order('id')); } catch (e) { } }
   const c = rcCalc(p, hist), s = stu(p.student_id), rev = D.pays.some(x => x.reversal_of === p.id), neg = p.amount_minor < 0;
   const url = location.origin + '/verify/?r=' + (p.receipt_no || '');
   const R = [], L = 40; let y = 540;
@@ -731,7 +765,7 @@ async function rcPDF(id) {
   if (c) { kv.push(['Balance before', fm(c.before)]); kv.push(['Balance after', fm(c.after)]); }
   kv.forEach(k => { if (k[1] === '') return; R.push({ t: k[0], x: L, y, s: 10, g: 0.4 }); R.push({ t: k[1], x: 150, y, s: 10, b: k[0] === 'Balance after' }); y -= 22; });
   if (rev) { y -= 8; R.push({ t: 'THIS PAYMENT WAS REVERSED', x: L, y, s: 11, b: 1 }); y -= 20; }
-  y -= 10; R.push({ t: 'Verify this receipt online:', x: L, y, s: 9, g: 0.4 }); y -= 13; R.push({ t: url, x: L, y, s: 9 });
+  y -= 10; if (p.local) { R.push({ t: 'PROVISIONAL RECEIPT. The official number is issued when this device syncs.', x: L, y, s: 9, g: 0.4 }); } else { R.push({ t: 'Verify this receipt online:', x: L, y, s: 9, g: 0.4 }); y -= 13; R.push({ t: url, x: L, y, s: 9 }); }
   R.push({ t: 'Issued with FeePilot', x: L, y: 60, s: 8, g: 0.5 });
   const blob = miniPDF(R, [[28, 40, 364, 530]]), name = 'receipt-' + (p.receipt_no || id) + '.pdf';
   /* phones and tablets: open the share sheet (Save to Files/Drive, WhatsApp, Print...) - this works where plain downloads silently fail */
@@ -835,7 +869,7 @@ function resizeImg(file, max, type) { return new Promise((res, rej) => { const i
 function photoSheet(id) { const s = stu(id); sheet('<h2>Photo · ' + E(s.full_name) + '</h2><div class="m">Take a picture or choose one. It is resized automatically.</div><label class="l" for="ph_f">Photo</label><input class="in" id="ph_f" type="file" accept="image/*"><div class="btns"><button class="btn blk" onclick="photoSave(\'' + id + '\')">Save photo</button></div>'); }
 async function photoSave(id) { if (!need()) return; const f = $('ph_f').files[0]; if (!f) return toast('Choose a photo first.', 'bad'); try { const b = await resizeImg(f, 640, 'image/jpeg'), p = sid() + '/' + id + '-' + Date.now() + '.jpg', u = await sb.storage.from('photos').upload(p, b, { contentType: 'image/jpeg' }); if (u.error) return toast('Upload failed: ' + friendly(u.error), 'bad'); await saved(await sb.from('students').update({ photo_path: p }).eq('id', id), 'Photo saved.'); } catch (e) { toast(e.message, 'bad'); } }
 async function statementSheet(id) {
-  const s = stu(id); let P = D.pays.filter(p => p.student_id === id).slice().reverse(); if (online()) { try { P = await all(() => sb.from('payments').select('*').eq('student_id', id).order('occurred_at').order('id')); } catch (e) { } }
+  const s = stu(id); let P = D.pays.filter(p => p.student_id === id).slice().reverse(); if (online()) { try { P = await all(() => sb.from('payments').select('*').eq('student_id', id).order('occurred_at').order('id')); P = P.concat(D.pays.filter(p => p.local && p.student_id === id && !P.some(x => x.id === p.id)).reverse()); } catch (e) { } }
   const F = FIDX[id] || [], nm = {}; F.forEach(f => nm[f.fee_item_id] = f.category);
   const rows = F.map(f => ['<tr><td>' + E(f.academic_year) + '</td><td>' + E(f.category) + (f.carried_to ? ' (carried to ' + E(f.carried_to) + ')' : '') + '</td><td class="num">' + fmn(f.amount_minor) + '</td><td class="num"></td></tr>']).concat(P.map(p => ['<tr><td>' + fd(p.occurred_at) + '</td><td>' + E(p.receipt_no || 'Reversal') + ' · ' + E(nm[p.fee_item_id] || '') + ' (' + E(p.method) + ')</td><td class="num"></td><td class="num">' + fmn(p.amount_minor) + '</td></tr>']));
   sheet('<h2>Statement</h2><div class="b">' + E(s.full_name) + '</div><div class="m">' + E(s.class_name || '') + ' · ' + E(D.school.name) + ' · ' + fd(td()) + '</div><div class="tw" style="margin-top:10px"><table class="t"><tr><th>When</th><th>Description</th><th class="num">Charge</th><th class="num">Paid</th></tr>' + rows.join('') + '<tr class="tot"><td colspan="2">Balance</td><td class="num" colspan="2">' + fm(F.reduce((t, f) => t + f.balance_minor, 0)) + '</td></tr></table></div><div class="btns np"><button class="btn" onclick="window.print()">' + ico('print', 18) + ' Print / PDF</button></div>', { wide: true });
@@ -1040,7 +1074,7 @@ PAGES.sync = function () {
     '<div class="row"><div class="t"><b>Waiting to sync</b><span class="m">' + q.length + ' item' + (q.length === 1 ? '' : 's') + ' on this device</span></div></div>' +
     (D.loaded ? '<div class="row"><div class="t"><b>Last updated</b><span class="m">' + E(new Date(D.loaded).toLocaleString('en-GB', { timeZone: 'Africa/Accra' })) + '</span></div></div>' : '') +
     '<div class="btns"><button class="btn blk" onclick="sync()" ' + (busy || !on ? 'disabled' : '') + '>' + (busy ? 'Syncing…' : 'Sync now') + '</button></div></div>' +
-    (q.length ? '<div class="card"><h3>On this device</h3>' + q.map(x => rowH('', '<b>' + E(x.k === 't' ? ({ students: 'Student', fee_items: 'Fees', accounts: 'Account', suppliers: 'Supplier', academic_years: 'Academic year', terms: 'Term', method_accounts: 'Account link' }[x.table] || x.table) + ' (' + x.rows.length + ')' : x.k === 'r' ? x.method : (x.k === 'x' ? 'Expense: ' + (x.description || '') : (x.amt ? fm(x.amt) + ' ' : '') + (x.method || 'Payment'))) + '</b><span class="m ' + (x.state === 'failed' ? 'neg' : '') + '">' + (x.state === 'failed' ? 'Failed: ' + E(x.err || 'rejected') : 'Waiting to sync') + '</span>', x.state === 'failed' ? '<button class="btn sm bad" onclick="dropFailed(\'' + x.id + '\')">Discard</button>' : '')).join('') + '</div>' : '') +
+    (q.length ? '<div class="card"><h3>On this device</h3>' + q.map(x => rowH('', '<b>' + E(x.k === 'v' ? 'Payment correction ' + fm(x.amt) : x.k === 't' ? ({ students: 'Student', fee_items: 'Fees', accounts: 'Account', suppliers: 'Supplier', academic_years: 'Academic year', terms: 'Term', method_accounts: 'Account link' }[x.table] || x.table) + ' (' + x.rows.length + ')' : x.k === 'r' ? x.method : (x.k === 'x' ? 'Expense: ' + (x.description || '') : (x.amt ? fm(x.amt) + ' ' : '') + (x.method || 'Payment'))) + '</b><span class="m ' + (x.state === 'failed' ? 'neg' : '') + '">' + (x.state === 'failed' ? 'Failed: ' + E(x.err || 'rejected') : 'Waiting to sync') + '</span>', x.state === 'failed' ? '<button class="btn sm bad" onclick="dropFailed(\'' + x.id + '\')">Discard</button>' : '')).join('') + '</div>' : '') +
     '<div class="card"><h3>Account</h3><div class="row"><div class="t"><b>' + E((U && U.email) || '') + '</b><span class="m">' + E(ROLES[role()] || '') + ' · ' + E(D.school.name) + '</span></div></div><div class="btns"><button class="btn sec" onclick="changePwSheet()">Change password</button><button class="btn bad" onclick="signOut()">Sign out</button></div></div>';
 };
 
@@ -1128,15 +1162,33 @@ function paPay() {
   const a = toP(val('pb_a')); if (!a || a <= 0) { PA.note = 'Failed: enter a valid amount.'; return draw(); }
   sb.rpc('platform_record_payment', { p_school: $('pb_s').value, p_amount: a, p_ref: val('pb_r') || null, p_from: $('pb_f').value || null, p_to: $('pb_t').value || null, p_note: val('pb_n') || null }).then(r => paRun(r, 'Payment recorded. The school is active until the new renewal date.'));
 }
+const PIV = { month: 1, term: 4, year: 12 };
+const paSel = id => { const e = $('pq_' + id); return e ? PA.PL.find(z => z.id === e.value) : null; };
 function paQuick(id, k) {
   const x = PA.S.find(z => z.id === id); if (!x) return;
-  const lbl = { t: 'start a 14-day free trial', m: 'record 1 month (GH₵ 250)', q: 'record 1 term (GH₵ 700)' }[k];
-  if (!confirm(x.name + ': ' + lbl + '?')) return;
-  if (k === 't') { const d = new Date(Date.now() + 14 * 864e5).toISOString(); return sb.rpc('platform_set_subscription', { p_school: id, p_plan: ((PA.PL.find(z => z.is_default) || {}).id) || null, p_status: 'trial', p_trial_ends: d, p_renews: null }).then(r => paRun(r, 'Trial started: 14 days.')); }
+  const pl = paSel(id); if (!pl) { PA.note = 'Failed: choose a plan for ' + x.name + ' first.'; return draw(); }
+  if (k === 't') {
+    if (!confirm(x.name + ': start a 14-day free trial on "' + pl.name + '"?')) return;
+    return sb.rpc('platform_set_subscription', { p_school: id, p_plan: pl.id, p_status: 'trial', p_trial_ends: new Date(Date.now() + 14 * 864e5).toISOString(), p_renews: null }).then(r => paRun(r, 'Trial started: 14 days.'));
+  }
+  if (k === 's') { // change plan only
+    if (!['trial', 'active', 'past_due', 'cancelled', 'suspended'].includes(x.sub_status)) { PA.note = 'Failed: this school is waiting for approval. Start a trial or record a payment first.'; return draw(); }
+    if (!confirm(x.name + ': change plan to "' + pl.name + '"?')) return;
+    return sb.rpc('platform_set_subscription', { p_school: id, p_plan: pl.id, p_status: x.sub_status, p_trial_ends: x.trial_ends_at || null, p_renews: x.renews_on || null }).then(r => paRun(r, 'Plan changed.'));
+  }
+  if (!confirm(x.name + ': record ' + fm(pl.price_minor) + ' for 1 ' + pl.billing_interval + ' on "' + pl.name + '"?')) return;
   const iso = d => d.toISOString().slice(0, 10), today = new Date(iso(new Date()));
   const cur = x.renews_on ? new Date(x.renews_on) : today, from = cur > today ? cur : today, to = new Date(from);
-  to.setUTCMonth(to.getUTCMonth() + (k === 'q' ? 4 : 1));
-  sb.rpc('platform_record_payment', { p_school: id, p_amount: k === 'q' ? 70000 : 25000, p_ref: null, p_from: iso(from), p_to: iso(to), p_note: k === 'q' ? '1 term' : '1 month' }).then(r => paRun(r, 'Paid. Active until ' + iso(to) + '.'));
+  to.setUTCMonth(to.getUTCMonth() + (PIV[pl.billing_interval] || 1));
+  sb.rpc('platform_record_payment', { p_school: id, p_amount: pl.price_minor, p_ref: null, p_from: iso(from), p_to: iso(to), p_note: '1 ' + pl.billing_interval + ' · ' + pl.name }).then(async r => {
+    if (!r.error) { const r2 = await sb.rpc('platform_set_subscription', { p_school: id, p_plan: pl.id, p_status: 'active', p_trial_ends: null, p_renews: iso(to) }); if (r2.error) r = r2; }
+    paRun(r, 'Paid. Active until ' + iso(to) + '.');
+  });
+}
+function paDel(id) {
+  const x = PA.S.find(z => z.id === id); if (!x) return;
+  if (!confirm('Remove "' + x.name + '" for good? This also removes its ' + x.students + ' student(s) and staff. It cannot be undone. Schools with payments cannot be removed.')) return;
+  sb.rpc('platform_delete_school', { p_school: id }).then(r => paRun(r, x.name + ' removed.'));
 }
 function paEdit(id) { PA.EP = PA.PL.find(p => p.id === id) || null; draw(); }
 function paPlan() {
@@ -1159,7 +1211,7 @@ PAGES.platform = function () {
       const ends = x.sub_status === 'trial' ? x.trial_ends_at : x.renews_on, dl = days(ends);
       const wait = x.sub_status === 'pending' ? ' <span class="badge" style="background:#fff3cd;color:#8a6d00;margin:0 6px">waiting for approval</span>' : ''; const warn = x.sub_status === 'pending' ? wait : x.sub_status !== 'suspended' && x.status !== 'suspended' && dl !== null && dl < 0 ? ' <span class="badge" style="background:#fde8e8;color:#b42318;margin:0 6px">read-only</span>' : (dl !== null && dl <= 7 ? ' <span class="badge" style="background:#fff3cd;color:#8a6d00;margin:0 6px">' + dl + ' days left</span>' : '');
       return '<div class="row" style="flex-wrap:wrap"><div class="t"><b>' + E(x.name) + '</b> <span class="m">' + E(x.code || '') + '</span>' + warn + '<span class="m">' + E(x.plan_name || 'no plan') + ' · ' + E(x.sub_status || '') + (x.trial_ends_at && x.sub_status === 'trial' ? ' · trial ends ' + E(x.trial_ends_at.slice(0, 10)) : '') + (x.renews_on ? ' · renews ' + E(x.renews_on) : '') + ' · ' + x.students + ' students · ' + x.staff + ' staff</span></div>' +
-        '<div style="width:100%;display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="chip" onclick="paQuick(\'' + x.id + '\',\'t\')">Free trial 14 days</button><button class="chip" onclick="paQuick(\'' + x.id + '\',\'m\')">Paid: 1 month · GH₵ 250</button><button class="chip" onclick="paQuick(\'' + x.id + '\',\'q\')">Paid: 1 term · GH₵ 700</button></div><span class="badge ' + (x.status === 'suspended' ? 'b' : '') + '">' + E(x.status) + '</span><button class="chip" onclick="paStatus(\'' + x.id + '\',\'' + (x.status === 'suspended' ? 'active' : 'suspended') + '\')">' + (x.status === 'suspended' ? 'Reactivate' : 'Suspend') + '</button></div>';
+        '<div style="width:100%;display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center"><select class="in" id="pq_' + x.id + '" style="flex:1;min-width:200px;margin:0">' + PA.PL.filter(z => z.active !== false || z.name === x.plan_name).map(z => '<option value="' + z.id + '"' + (z.name === x.plan_name ? ' selected' : '') + '>' + E(z.name) + ' · ' + fm(z.price_minor) + '</option>').join('') + '</select><button class="chip" onclick="paQuick(\'' + x.id + '\',\'s\')">Set plan</button><button class="chip" onclick="paQuick(\'' + x.id + '\',\'p\')">Record payment</button><button class="chip" onclick="paQuick(\'' + x.id + '\',\'t\')">Free trial 14 days</button><button class="chip" style="color:#b42318" onclick="paDel(\'' + x.id + '\')">Remove</button></div><span class="badge ' + (x.status === 'suspended' ? 'b' : '') + '">' + E(x.status) + '</span><button class="chip" onclick="paStatus(\'' + x.id + '\',\'' + (x.status === 'suspended' ? 'active' : 'suspended') + '\')">' + (x.status === 'suspended' ? 'Reactivate' : 'Suspend') + '</button></div>';
     }).join('') || '<div class="m">No schools yet.</div>') + '</div>';
     if (PA.S.length) h += '<details class="card"><summary><b>Advanced: set dates by hand</b></summary><label class="l">School</label><select class="in" id="pa_s">' + op(so) + '</select><label class="l">Plan</label><select class="in" id="pa_p">' + op(po) + '</select><label class="l">Status</label><select class="in" id="pa_x">' + ['trial', 'active', 'past_due', 'suspended', 'cancelled'].map(x => '<option>' + x + '</option>').join('') + '</select><label class="l">Trial ends</label><input class="in" id="pa_t" type="datetime-local"><label class="l">Renews on</label><input class="in" id="pa_r" type="date"><button class="btn" style="margin-top:14px" onclick="paSub()">Save</button></details>';
   }
