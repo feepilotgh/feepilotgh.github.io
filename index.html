@@ -27,9 +27,10 @@ nav.d a:hover{color:var(--navy)}
 .pill{display:inline-block;background:#fff;border:1px solid var(--line);color:var(--navy);font-weight:700;font-size:13px;padding:6px 14px;border-radius:99px}
 .hero h1{font-size:clamp(34px,5.4vw,56px);margin:16px 0 14px}.hero p.l{font-size:19px;color:var(--mut);max-width:520px;margin:0 0 26px}
 .cta{display:flex;gap:12px;flex-wrap:wrap}.note{margin-top:14px;font-size:13.5px;color:var(--mut)}
-.ph{display:flex;justify-content:center;gap:16px;align-items:flex-end}
-.ph img{border-radius:26px;border:6px solid var(--navy);box-shadow:0 30px 60px rgba(11,42,102,.25);background:#fff}
-.ph img:first-child{width:46%;transform:translateY(24px)}.ph img:last-child{width:46%}
+.ph{position:relative;padding-bottom:34px}
+.ph img{background:#fff}
+.ph .lap{display:block;width:100%;height:auto;border-radius:14px;border:7px solid var(--navy);border-bottom-width:12px;box-shadow:0 30px 60px rgba(11,42,102,.25)}
+.ph .sm{position:absolute;right:-6px;bottom:0;width:27%;height:auto;border-radius:20px;border:5px solid var(--navy);box-shadow:0 20px 40px rgba(11,42,102,.3)}
 @media(max-width:860px){.hg{grid-template-columns:1fr}.hero{padding-top:36px}}
 section{padding:72px 0}section.alt{background:var(--bg)}
 .sh{text-align:center;max-width:640px;margin:0 auto 40px}.sh h2{font-size:clamp(28px,4vw,40px)}.sh p{color:var(--mut);font-size:17.5px;margin:12px 0 0}
@@ -66,7 +67,7 @@ footer{padding:36px 0;border-top:1px solid var(--line);color:var(--mut);font-siz
 <p class="l">FeePilot is the accounting office for your school. Record fees in seconds, print receipts parents can verify, text reminders to those who owe, and see your whole picture at a glance.</p>
 <div class="cta"><a class="btn b1" href="demo/">Try a sample school</a><a class="btn b2" href="app/#signup">Create your school</a><a class="btn b2" href="#features">See what it does</a></div>
 <div class="note">No card needed. Works on any phone, tablet or computer.</div></div>
-<div class="ph"><img src="img/shot-home.jpg" alt="FeePilot dashboard on a phone" width="520" height="1100"><img src="img/shot-student.jpg" alt="A student's fee profile on a phone" width="520" height="1100"></div></div></div>
+<div class="ph"><img class="lap" src="img/shot-desktop.jpg" alt="FeePilot overview dashboard on a computer" width="1400" height="875"><img class="sm" src="img/shot-home.jpg" alt="The same school on a phone" width="520" height="1100"></div></div></div>
 
 <section id="features"><div class="w"><div class="sh"><h2>Everything your accounts office needs</h2><p>From the first admission fee to the end-of-term report, in one place.</p></div>
 <div class="grid">
