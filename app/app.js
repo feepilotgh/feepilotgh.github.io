@@ -957,10 +957,15 @@ function cfSheet() { const yo = D.yrs.map(y => [y.name, y.name]); sheet('<h2>Car
 async function cfGo() { if (!need()) return; const f = $('cf_f').value, t = $('cf_t').value; if (!f || !t || f === t) return toast('Choose two different years.', 'bad'); if (!await askYes('Carry forward from ' + f + ' to ' + t + '?', 'This happens once and cannot be undone.', 'Carry forward', true)) return; const r = await sb.rpc('carry_forward', { p_school: sid(), p_from: f, p_to: t }); await saved(r, r.data + ' student balance(s) carried forward.'); }
 
 /* ---------- exports ---------- */
-async function dlRows(name, head, rows) {
-  try { await lj(XLSX_URLS); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head].concat(rows)), 'Sheet1'); XLSX.writeFile(wb, name + '.xlsx'); }
-  catch (e) { const csv = [head].concat(rows).map(r => r.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\n'), a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv' })); a.download = name + '.csv'; a.click(); }
+async function dlRows(name, head, rows) { // CSV: works offline, opens in Excel, no outside libraries
+  const csv = '\ufeff' + [head].concat(rows).map(r => r.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\r\n'), fname = name + '.csv';
+  window.__csv = { fname, csv };
+  try { const f = new File([csv], fname, { type: 'text/csv' }); if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f], title: fname }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  csvSheet();
 }
+function csvDownload() { const o = window.__csv; if (!o) return; try { const a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(o.csv); a.download = o.fname; document.body.appendChild(a); a.click(); a.remove(); toast('If nothing downloads, use Copy instead.', 'ok'); } catch (e) { toast('Could not download. Use Copy.', 'bad'); } }
+async function csvCopy() { const o = window.__csv; if (!o) return; const ta = $('csv_t'); try { await navigator.clipboard.writeText(o.csv.replace(/^\ufeff/, '')); } catch (e) { ta.select(); try { document.execCommand('copy'); } catch (e2) { } } toast('Copied. Paste it into Notes, WhatsApp or a spreadsheet.', 'ok'); }
+function csvSheet() { const o = window.__csv, n = o.csv.split('\r\n').length - 1; sheet('<h2>Export ready</h2><p class="m">' + n + ' rows in <b>' + E(o.fname) + '</b>. This is a CSV file. Excel, Google Sheets and phones open it.</p><div class="btns"><button class="btn blk" onclick="csvDownload()">Download CSV</button><button class="btn" onclick="csvCopy()">Copy all</button></div><textarea id="csv_t" class="in" rows="6" readonly style="margin-top:10px;font-size:12px;font-family:monospace">' + E(o.csv.replace(/^\ufeff/, '')) + '</textarea>'); }
 function exportStudents() {
   const rows = D.students.filter(s => !SV.cls || s.class_name === SV.cls).map(s => { const f = FIDX[s.id] || []; return [s.student_no, s.full_name, s.class_name, s.gender || '', s.guardian_name || '', s.guardian_phone || '', s.status || 'active', mn(f.reduce((t, x) => t + x.amount_minor, 0)), mn(f.reduce((t, x) => t + x.paid_minor, 0)), mn(f.reduce((t, x) => t + bal(x), 0))]; });
   dlRows('students' + (SV.cls ? '-' + SV.cls : ''), ['Student ID', 'Name', 'Class', 'Gender', 'Guardian', 'Guardian phone', 'Status', 'Fees (GHS)', 'Paid (GHS)', 'Balance (GHS)'], rows);
@@ -1134,7 +1139,7 @@ async function runRep() {
   try { const a = FV.rp_a1 || '', b = FV.rp_b1 || ''; RES = await REP[RP].run(a, b); RES.title = REP[RP].n; RES.sub = (REP[RP].f.includes('r') ? ' · ' + a + ' to ' + b : '') + (RES.sub || ''); RES.note = RES.note || 'Prepared from FeePilot records. Cash-basis operational report, not audited accounts.'; sb.rpc('log_report', { p_school: sid(), p_name: REP[RP].n }); showRes(); }
   catch (e) { RES = null; rr.innerHTML = '<div class="card"><div class="err">' + E(friendly(e)) + '</div></div>'; }
 }
-async function xl() { try { await lj(XLSX_URLS); } catch (e) { return toast(e.message, 'bad'); } const ws = XLSX.utils.aoa_to_sheet([RES.cols].concat(RES.rows, RES.tot ? [RES.tot] : []).map(r => r.map(c => c && typeof c === 'object' ? mn(c.m) : c))), wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, 'feepilot-' + RP + '.xlsx'); }
+async function xl() { try { await lj(XLSX_URLS); } catch (e) { return dlRows('feepilot-' + RP, RES.cols, RES.rows.concat(RES.tot ? [RES.tot] : []).map(r => r.map(c => c && typeof c === 'object' ? mn(c.m) : c))); } const ws = XLSX.utils.aoa_to_sheet([RES.cols].concat(RES.rows, RES.tot ? [RES.tot] : []).map(r => r.map(c => c && typeof c === 'object' ? mn(c.m) : c))), wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, 'feepilot-' + RP + '.xlsx'); }
 async function pdf() {
   try { await lj(['https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js']); await lj(['https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js']); } catch (e) { return toast(e.message, 'bad'); }
   const d = new window.jspdf.jsPDF(); d.setFontSize(14); d.text(String(D.school.name), 14, 14); d.setFontSize(10); d.text((RES.title + ' ' + (RES.sub || '')).replace(/[^\x20-\x7E]/g, '-'), 14, 21);
